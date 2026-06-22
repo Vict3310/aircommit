@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import config from '../core/config.js';
 import { saveUserSession, deleteUserSession, getUserSession, encrypt } from '../services/supabase.js';
 import { registerZeroGCommands } from '../services/zerog-models.js';
+import { fetchWithTimeout } from '../core/fetch-timeout.js';
 import keyService from '../services/keys.js';
 
 // ─── Security Helpers ───────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ function signOAuthState(chatId) {
   return `${payload}:${signature}`;
 }
 
-export function registerAuthCommands(bot) {
+export function registerAuthCommands(bot, sendStatus) {
   bot.onText(/^\/start$/, (msg) => {
     bot.sendMessage(msg.chat.id,
       `👋 *Welcome to AirCommit!*\n\n` +
@@ -212,6 +213,44 @@ export function registerAuthCommands(bot) {
     bot.sendMessage(chatId, `👋 You have been logged out.`);
   });
 
+  bot.onText(/^\/revoke$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const session = await getUserSession(chatId);
+
+    if (!session || !session.github_token) {
+      return bot.sendMessage(chatId, '🔴 You are not logged in. Use `/login` first.');
+    }
+
+    const status = await sendStatus(chatId, `🔄 Revoking your GitHub token...`);
+    try {
+      const res = await fetchWithTimeout('https://github.com/settings/connections/applications', {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${session.github_token}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'AirCommit',
+        },
+        body: JSON.stringify({
+          client_id: config.githubClientId,
+        }),
+      }, 10000);
+
+      if (res.ok || res.status === 204) {
+        await deleteUserSession(chatId);
+        await status.update(`✅ Token revoked on GitHub and local session deleted.`);
+      } else {
+        // Revocation endpoint may not exist for all OAuth apps; offer manual link
+        await status.update(
+          `⚠️ Could not automatically revoke the token (GitHub API returned ${res.status}).\n\n` +
+          `Please revoke it manually at:\nhttps://github.com/settings/applications\n\n` +
+          `You can also run \`/logout\` to clear your local session.`
+        );
+      }
+    } catch (error) {
+      await status.update(`⚠️ Revocation failed: ${error.message}\n\nPlease revoke manually at https://github.com/settings/applications`);
+    }
+  });
+
   bot.onText(/^\/status$/, async (msg) => {
     const chatId = msg.chat.id;
     const session = await getUserSession(chatId);
@@ -219,8 +258,8 @@ export function registerAuthCommands(bot) {
     if (!session || !session.github_token) {
       bot.sendMessage(chatId, '🔴 You are not logged in.');
     } else {
-      const hasCustomKey = !!session.custom_openrouter_key;
-      const hasZeroGKey = Object.keys(session.custom_zerog_keys || {}).length > 0;
+      const hasCustomKey = !!session?.custom_openrouter_key;
+      const hasZeroGKey = !!session?.custom_zerog_key;
       const model = session.selected_model || config.codingModel;
 
       let tier = '🆓 Free Tier';
@@ -276,9 +315,9 @@ export function registerAuthCommands(bot) {
 
     // Validate the key by making a test request to OpenRouter
     try {
-      const testRes = await fetch('https://openrouter.ai/api/v1/models', {
+      const testRes = await fetchWithTimeout('https://openrouter.ai/api/v1/models', {
         headers: { 'Authorization': `Bearer ${input}` }
-      });
+      }, 10000);
       if (!testRes.ok) {
         const errorData = await testRes.json().catch(() => ({}));
         throw new Error(errorData.message || 'Key validation failed.');
@@ -342,9 +381,9 @@ export function registerAuthCommands(bot) {
 
     // Test the key
     try {
-      const testRes = await fetch('https://api.openai.com/v1/models', {
+      const testRes = await fetchWithTimeout('https://api.openai.com/v1/models', {
         headers: { 'Authorization': `Bearer ${input}` }
-      });
+      }, 10000);
       if (!testRes.ok) {
         const errorData = await testRes.json().catch(() => ({}));
         throw new Error(errorData.error?.message || 'Key validation failed.');
@@ -367,7 +406,7 @@ export function registerAuthCommands(bot) {
     const chatId = msg.chat.id;
     const session = await getUserSession(chatId);
     const hasKey = !!session?.custom_openrouter_key;
-    const hasZeroG = Object.keys(session?.custom_zerog_keys || {}).length > 0;
+    const hasZeroG = !!session?.custom_zerog_key;
 
     const freeList = FREE_MODELS.map((m, i) => `${i + 1}. \`${m.id}\`\n   ${m.label}`).join('\n');
     const premiumList = PREMIUM_MODELS.map((m, i) => `${i + 1}. \`${m.id}\`\n   ${m.label}`).join('\n');

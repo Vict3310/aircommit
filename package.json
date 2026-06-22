@@ -7,10 +7,16 @@
     "start": "node src/index.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "telegram",
+    "github",
+    "ai",
+    "coding",
+    "assistant"
+  ],
+  "author": "Chioma Ato",
   "license": "ISC",
-  "description": "",
+  "description": "Telegram-based AI coding assistant that integrates GitHub, OpenRouter AI models, and 0G decentralized storage.",
   "dependencies": {
     "@0gfoundation/0g-storage-ts-sdk": "^1.2.10",
     "@octokit/rest": "^22.0.1",

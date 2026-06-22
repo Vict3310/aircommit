@@ -1,12 +1,13 @@
 import { getSupabase } from '../services/supabase.js';
 import { requireSession, fetchFile, getDefaultBranch, getRepoFilePaths } from '../services/github.js';
 import config from '../core/config.js';
+import { fetchWithTimeout } from '../core/fetch-timeout.js';
 
 async function generateEmbedding(text) {
   if (!config.openaiApiKey) {
     throw new Error('OpenAI API key is required to generate embeddings for RAG.');
   }
-  const response = await fetch('https://api.openai.com/v1/embeddings', {
+  const response = await fetchWithTimeout('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${config.openaiApiKey}`,
@@ -16,8 +17,14 @@ async function generateEmbedding(text) {
       model: 'text-embedding-3-small',
       input: text
     })
-  });
-  const data = await response.json();
+  }, 15000);
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('OpenAI returned an invalid response.');
+  }
   if (data.error) throw new Error(data.error.message);
   return data.data[0].embedding;
 }
@@ -31,7 +38,7 @@ async function generateEmbeddingsBatch(texts) {
   }
   if (texts.length === 0) return [];
 
-  const response = await fetch('https://api.openai.com/v1/embeddings', {
+  const response = await fetchWithTimeout('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${config.openaiApiKey}`,
@@ -41,8 +48,14 @@ async function generateEmbeddingsBatch(texts) {
       model: 'text-embedding-3-small',
       input: texts
     })
-  });
-  const data = await response.json();
+  }, 15000);
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('OpenAI returned an invalid response.');
+  }
   if (data.error) throw new Error(data.error.message);
   return data.data.map(result => result.embedding);
 }

@@ -4,7 +4,7 @@ import { getSupabase, encrypt, decrypt } from '../services/supabase.js';
 import config from '../core/config.js';
 
 export function registerArchiveCommands(bot, sendStatus) {
-  
+
   // /archive — Encrypt and save current conversation history to 0G
   bot.onText(/^\/archive$/, async (msg) => {
     const chatId = msg.chat.id;
@@ -59,7 +59,15 @@ export function registerArchiveCommands(bot, sendStatus) {
 
       await status.update('🔐 Decrypting chat archive...');
       const decryptedString = decrypt(encryptedPayload.encryptedData);
-      const history = JSON.parse(decryptedString);
+      if (!decryptedString) {
+        throw new Error('Decryption returned empty result. The archive may be corrupted or use a different encryption key.');
+      }
+      let history;
+      try {
+        history = JSON.parse(decryptedString);
+      } catch (parseErr) {
+        throw new Error(`Archive JSON is invalid: ${parseErr.message}`);
+      }
 
       if (!Array.isArray(history)) {
         throw new Error('Retrieved archive does not contain a valid history array.');

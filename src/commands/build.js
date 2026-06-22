@@ -2,6 +2,7 @@ import { chatHistories } from './chat.js';
 import { CHAT_SYSTEM_PROMPT } from '../core/prompts.js';
 import { getUserSession } from '../services/supabase.js';
 import { hasFeature, premiumFeatureMessage } from '../services/subscription.js';
+import { checkBotRateLimit } from '../core/rate-limit.js';
 
 export function registerBuildCommands(bot, sendStatus) {
 
@@ -13,6 +14,12 @@ export function registerBuildCommands(bot, sendStatus) {
     const session = await getUserSession(chatId);
     if (!hasFeature(session, 'smart')) {
       return bot.sendMessage(chatId, premiumFeatureMessage());
+    }
+
+    // Check rate limit
+    const rl = checkBotRateLimit(chatId, 'heavy');
+    if (rl) {
+      return bot.sendMessage(chatId, rl);
     }
 
     // Initialize session if it doesn't exist
@@ -35,9 +42,9 @@ Please act as an autonomous agent:
     // Create a mock message to trigger the standard chat loop
     const mockMsg = { ...msg, text: prompt };
 
-    // Defer execution slightly to let the UI breathe
-    setTimeout(() => {
+    // Use process.nextTick for synchronous deferral (avoids setTimeout race conditions)
+    process.nextTick(() => {
       bot.emit('message', mockMsg);
-    }, 500);
+    });
   });
 }

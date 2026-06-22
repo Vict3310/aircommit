@@ -207,23 +207,28 @@ export function getOptimalModel(message, models = {}) {
   const lowerMsg = message.toLowerCase();
   const msgLength = message.length;
 
+  const codeOps = /fix|smart|create|patch|write|build/;
+  const codeEditing = /fix|smart|create|edit|patch|write|build|generate|code/;
+  const planning = /plan|architect|debug|analyze|review/;
+  const reasoning = /why|how|explain|reason|problem|solution/;
+
   // Simple tasks (short, no code operations) → use faster model
-  if (msgLength < 100 && !lowerMsg.includes('fix|smart|create|patch|write|build')) {
+  if (msgLength < 100 && !codeOps.test(lowerMsg)) {
     return models.simple || 'meta-llama/llama-3.3-70b-instruct:free';
   }
 
   // Coding tasks → use specialized coder model
-  if (lowerMsg.includes('fix|smart|create|edit|patch|write|build|generate|code')) {
+  if (codeEditing.test(lowerMsg)) {
     return models.coding || 'qwen/qwen-2.5-coder-32b-instruct';
   }
 
   // Complex planning/bugs → use high-quality model
-  if (lowerMsg.includes('plan|architect|debug|analyze|review')) {
+  if (planning.test(lowerMsg)) {
     return models.complex || 'anthropic/claude-3.5-sonnet:beta';
   }
 
   // Reasoning-heavy tasks → use reasoning model
-  if (lowerMsg.includes('why|how|explain|reason|analyze|problem|solution')) {
+  if (reasoning.test(lowerMsg)) {
     return models.reasoning || 'deepseek/deepseek-r1:free';
   }
 

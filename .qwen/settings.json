@@ -22,7 +22,8 @@
       "Bash(mkdir *)",
       "Bash(xargs *)",
       "Bash(fuser *)",
-      "Bash(cat *)"
+      "Bash(cat *)",
+      "Skill(review)"
     ]
   },
   "$version": 4

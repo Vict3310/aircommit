@@ -10,6 +10,7 @@
 import config from '../core/config.js';
 import { getUserSession, saveUserSession } from './supabase.js';
 import keyService from './keys.js';
+import { fetchWithTimeout } from '../core/fetch-timeout.js';
 
 const ZEROG_API_BASE = 'https://router-api.0g.ai';
 const ZEROG_MODELS_ENDPOINT = `${ZEROG_API_BASE}/v1/models`;
@@ -29,7 +30,12 @@ export async function fetchZeroGModels() {
       throw new Error(`0G API returned ${response.status}`);
     }
 
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error('0G API returned an invalid response.');
+    }
     const models = Array.isArray(data.data) ? data.data : [];
 
     // Extract model IDs and format them
@@ -183,9 +189,9 @@ export function registerZeroGCommands(bot) {
     try {
       await bot.sendChatAction(chatId, 'typing');
 
-      const testRes = await fetch(`${ZEROG_API_BASE}/v1/models`, {
+      const testRes = await fetchWithTimeout(`${ZEROG_API_BASE}/v1/models`, {
         headers: { 'Authorization': `Bearer ${key}` }
-      });
+      }, 10000);
 
       if (!testRes.ok) {
         const errorData = await testRes.json().catch(() => ({}));

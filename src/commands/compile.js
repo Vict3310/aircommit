@@ -97,7 +97,12 @@ export function registerCompileCommands(bot, sendStatus) {
       };
 
       // Compile the contract
-      const compiledJson = JSON.parse(solc.compile(JSON.stringify(input)));
+      let compiledJson;
+      try {
+        compiledJson = JSON.parse(solc.compile(JSON.stringify(input)));
+      } catch (parseErr) {
+        throw new Error(`Solidity compiler returned invalid JSON: ${parseErr.message}`);
+      }
 
       // Handle Errors
       if (compiledJson.errors) {

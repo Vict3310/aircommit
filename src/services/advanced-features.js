@@ -16,6 +16,7 @@ import { requireSession, fetchFile, getDefaultBranch } from './github.js';
 import { callAIRaw } from './ai.js';
 import { uploadAuditLogTo0G } from './zerog.js';
 import config from '../core/config.js';
+import { fetchWithTimeout } from '../core/fetch-timeout.js';
 
 // ─── 13. Auto-Merge CI/CD Integration ────────────────────────────────────────
 
@@ -127,7 +128,7 @@ export async function transcribeVoice(voiceBuffer, config) {
     formData.append('file', new Blob([voiceBuffer]), 'voice.ogg');
     formData.append('model', modelName);
 
-    const res = await fetch(apiUrl, { method: 'POST', headers, body: formData });
+    const res = await fetchWithTimeout(apiUrl, { method: 'POST', headers, body: formData }, 30000);
     const json = await res.json();
 
     return { text: json.text };
@@ -233,7 +234,7 @@ export function addCollabTask(sessionId, task) {
  * Get all active collaboration sessions
  */
 export function getCollabSessions() {
-  return Array.from(colaborationSessions.values())
+  return Array.from(collaborationSessions.values())
     .filter(s => Date.now() - s.lastActivity < 3600000); // 1 hour TTL
 }
 
@@ -532,41 +533,6 @@ export function registerAdvancedCommands(bot, sendStatus) {
     }
   });
 
-  // --- 15. Voice transcribe ---
-  bot.on('voice', async (msg) => {
-    const chatId = msg.chat.id;
-    const voiceFileId = msg.voice.file_id;
-
-    const status = await sendStatus(chatId, `🎙️ Transcribing voice message...`);
-
-    try {
-      const fileUrl = await bot.getFileLink(voiceFileId);
-      const fileRes = await fetch(fileUrl);
-      const fileBuffer = await fileRes.arrayBuffer();
-
-      const transcription = await transcribeVoice(fileBuffer, config);
-
-      if (transcription.error) {
-        await status.update(`❌ Transcription failed: ${transcription.error}`);
-        return;
-      }
-
-      const command = textToCommand(transcription.text);
-
-      let response = `🗣️ *Transcribed:*\n"${transcription.text}"\n\n`;
-
-      if (command.isMessage) {
-        response += `💬 Treat as chat message`;
-      } else {
-        response += `⚡ Executing: /${command.command} ${command.params}`;
-      }
-
-      await status.update(response);
-    } catch (error) {
-      await status.update(`❌ Error: ${error.message}`);
-    }
-  });
-
   // --- 16. Collaborative coding ---
   bot.onText(/^\/collab\s+(create|add|remove|status|join)\s*(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
@@ -586,7 +552,7 @@ export function registerAdvancedCommands(bot, sendStatus) {
         `Members: 1`,
         { parse_mode: 'Markdown' });
     } else if (action === 'status') {
-      const session = Array.from(colaborationSessions.values()).find(s => s.id === params);
+      const session = Array.from(collaborationSessions.values()).find(s => s.id === params);
       if (!session) {
         await bot.sendMessage(chatId, `❌ Session not found or expired.`);
         return;

@@ -178,7 +178,7 @@ export const PAYMENT_METHODS = {
         enabled: true,
         details: {
             bank: 'Opay',
-            account_number: process.env.PAYMENT_BANK_ACCOUNT || '7012345678',
+            account_number: process.env.PAYMENT_BANK_ACCOUNT || '__SET_REAL_ACCOUNT_IN_ENV__',
             account_name: 'AirCommit',
         },
     },
@@ -188,6 +188,8 @@ export const PAYMENT_METHODS = {
         description: '💰 Manual activation (~10 min)',
         enabled: true,
         details: {
+            // WARNING: Zero-address placeholders will cause users to LOSE funds.
+            // These MUST be set via PAYMENT_USDT_BSC and PAYMENT_BNB_BSC env vars.
             usdt_bsc: process.env.PAYMENT_USDT_BSC || '0x0000000000000000000000000000000000000000',
             bnb_bsc: process.env.PAYMENT_BNB_BSC || '0x0000000000000000000000000000000000000000',
         },

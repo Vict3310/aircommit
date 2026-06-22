@@ -6,6 +6,7 @@ import { uploadAuditLogTo0G } from './zerog.js';
 import { sendStatusUpdate } from './websocket.js';
 import { resolveAIKey } from './keys.js';
 import { createGzip, createGunzip } from 'zlib';
+import { fetchWithTimeout } from '../core/fetch-timeout.js';
 
 const MAX_COMPRESS_LENGTH = 1000;
 const MAX_TELEGRAM_MESSAGE = 4000;
@@ -82,7 +83,7 @@ async function resolveUserAI(chatId, defaultModel) {
 
 export async function callAI(systemPrompt, userMessage, model = config.codingModel, chatId = null) {
   const { apiKey, model: resolvedModel, endpoint } = await resolveUserAI(chatId, model);
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -96,11 +97,20 @@ export async function callAI(systemPrompt, userMessage, model = config.codingMod
       ],
       max_tokens: 2000,
     }),
-  });
+  }, 15000);
 
-  const json = await response.json();
+  let json;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error('AI returned an invalid response. Please try again.');
+  }
   if (!response.ok) {
-    throw new Error(`OpenRouter API error: ${json?.error?.message || response.statusText}`);
+    const errMsg = json?.error?.message || response.statusText;
+    if (response.status === 429) {
+      throw Object.assign(new Error(`Rate limited: ${errMsg}`), { rateLimited: true });
+    }
+    throw new Error(`OpenRouter API error: ${errMsg}`);
   }
   if (!json.choices || json.choices.length === 0) {
     throw new Error('OpenRouter returned no choices.');
@@ -117,7 +127,7 @@ export async function callAI(systemPrompt, userMessage, model = config.codingMod
 
 export async function callAIRaw(systemPrompt, userMessage, model = config.codingModel, chatId = null) {
   const { apiKey, model: resolvedModel, endpoint } = await resolveUserAI(chatId, model);
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -131,11 +141,21 @@ export async function callAIRaw(systemPrompt, userMessage, model = config.coding
       ],
       max_tokens: 2000,
     }),
-  });
+  }, 15000);
 
-  const json = await response.json();
+  let json;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error('AI returned an invalid response. Please try again.');
+  }
   if (!response.ok) {
-    throw new Error(`OpenRouter API error: ${json?.error?.message || response.statusText}`);
+    const errMsg = json?.error?.message || response.statusText;
+    // Rate limit errors: add context so the fallback logic can decide
+    if (response.status === 429) {
+      throw Object.assign(new Error(`Rate limited: ${errMsg}`), { rateLimited: true });
+    }
+    throw new Error(`OpenRouter API error: ${errMsg}`);
   }
   return json.choices[0].message.content.replace(/^\`\`\`(?:[a-zA-Z0-9]+)?\n?/i, '').replace(/\n?\`\`\`$/i, '').trim();
 }
@@ -148,7 +168,7 @@ const CHAT_MODEL_FALLBACKS = [
 ];
 
 async function tryOneChatRound(model, currentMessages, apiKey, endpoint) {
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -161,11 +181,20 @@ async function tryOneChatRound(model, currentMessages, apiKey, endpoint) {
       tool_choice: 'auto',
       max_tokens: 2000,
     }),
-  });
+  }, 15000);
 
-  const json = await response.json();
+  let json;
+  try {
+    json = await response.json();
+  } catch {
+    throw new Error(`Model ${model} returned an invalid response.`);
+  }
   if (!response.ok) {
-    throw new Error(`OpenRouter API error: ${json?.error?.message || response.statusText}`);
+    const errMsg = json?.error?.message || response.statusText;
+    if (response.status === 429) {
+      throw Object.assign(new Error(`Rate limited: ${errMsg}`), { rateLimited: true });
+    }
+    throw new Error(`OpenRouter API error: ${errMsg}`);
   }
   if (!json.choices || json.choices.length === 0) {
     throw new Error(`Model ${model} returned no choices.`);
@@ -205,22 +234,31 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
     let assistantMessage;
     let lastErr;
 
-    for (const model of [activeModel, ...fallbacks]) {
-      try {
-        const currentEndpoint = (model === activeModel) ? activeEndpoint : 'https://openrouter.ai/api/v1/chat/completions';
-        const currentApiKey = (model === activeModel) ? apiKey : config.openrouterKey;
-        const actualModelName = model.startsWith('0g/') ? model.replace('0g/', '') : model;
+    try {
+      for (const model of [activeModel, ...fallbacks]) {
+        try {
+          const currentEndpoint = (model === activeModel) ? activeEndpoint : 'https://openrouter.ai/api/v1/chat/completions';
+          const currentApiKey = (model === activeModel) ? apiKey : config.openrouterKey;
+          const actualModelName = model.startsWith('0g/') ? model.replace('0g/', '') : model;
 
-        assistantMessage = await tryOneChatRound(actualModelName, currentMessages, currentApiKey, currentEndpoint);
-        if (model !== activeModel) activeModel = model;
-        lastErr = null;
-        break;
-      } catch (err) {
-        lastErr = err;
+          assistantMessage = await tryOneChatRound(actualModelName, currentMessages, currentApiKey, currentEndpoint);
+          if (model !== activeModel) activeModel = model;
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
       }
-    }
 
-    if (lastErr) throw lastErr;
+      if (lastErr) throw lastErr;
+    } catch (e) {
+      // Unexpected error during the conversation loop — respond gracefully
+      await onStatus(`❌ ${e.message}`);
+      return {
+        reply: `I encountered an unexpected error: ${e.message}. If it persists, please try again later.`,
+        updatedMessages: currentMessages
+      };
+    }
 
     currentMessages.push(assistantMessage);
 
@@ -330,12 +368,26 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           if (args.action === 'add') {
             pkg.dependencies = pkg.dependencies || {};
             for (const p of args.packages) {
-              const res = await fetch(`https://registry.npmjs.org/${p}/latest`);
+              let res;
+              try {
+                res = await fetchWithTimeout(`https://registry.npmjs.org/${p}/latest`, {}, 5000);
+              } catch {
+                pkg.dependencies[p] = 'latest';
+                continue;
+              }
               if (res.ok) {
-                const data = await res.json();
-                pkg.dependencies[p] = `^${data.version}`;
+                try {
+                  const data = await res.json();
+                  if (data?.version) {
+                    pkg.dependencies[p] = `^${data.version}`;
+                  } else {
+                    pkg.dependencies[p] = 'latest';
+                  }
+                } catch {
+                  pkg.dependencies[p] = 'latest';
+                }
               } else {
-                pkg.dependencies[p] = "latest";
+                pkg.dependencies[p] = 'latest';
               }
             }
           } else if (args.action === 'remove') {
@@ -379,44 +431,8 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
     }
 
     if (treeChanges.length > 0) {
-      await onStatus(`🌐 Committing ${treeChanges.length} changes atomically...`);
-      try {
-        const { owner, repo, github_token } = session;
-        const writeOctokit = createWriteOctokit(github_token);
-        const defaultBranch = await getDefaultBranch(writeOctokit, owner, repo);
-        const msg = treeChanges[0].commitMessage || 'Agentic modifications';
-
-        await commitChangesWithTree(writeOctokit, owner, repo, defaultBranch, msg, treeChanges);
-        await invalidateFileTree(owner, repo);
-
-        // Track action in session history for /history command
-        const actionHistory = session.action_history || [];
-        actionHistory.push({
-          action: msg,
-          file: treeChanges.map(c => c.path).join(', '),
-          timestamp: new Date().toISOString()
-        });
-        const trimmed = actionHistory.slice(-50); // keep last 50
-        await saveUserSession(chatId, { action_history: trimmed });
-
-        await onStatus(`🌐 Audit: Uploading to 0G...`);
-        const auditData = {
-          timestamp: new Date().toISOString(),
-          type: 'agent_edit',
-          repo: `${owner}/${repo}`,
-          commitMessage: msg,
-          steps: treeChanges.map(c => ({ file: c.path, action: c.action, status: '✅' })),
-          approvedByChatId: chatId,
-        };
-        const zgRes = await uploadAuditLogTo0G(auditData);
-        if (zgRes) {
-          await onStatus(`✅ Committed atomically & logged to 0G!\nTx: \`${zgRes.txHash}\``);
-        } else {
-          await onStatus(`✅ Committed atomically!`);
-        }
-      } catch (commitErr) {
-        toolResults.push({ id: 'system_commit', result: `Atomic commit failed: ${commitErr.message}` });
-      }
+      // Collect changes but don't auto-commit — return them for user approval
+      await onStatus(`🌐 Staged ${treeChanges.length} changes — awaiting approval...`);
     }
 
     for (const { id, result } of toolResults) {
@@ -432,6 +448,17 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           content: `System Warning: ${result}`
         });
       }
+    }
+
+    // If we have pending changes, return them with a prompt for approval
+    if (treeChanges.length > 0) {
+      const msg = treeChanges[0].commitMessage || 'Agentic modifications';
+      const files = treeChanges.map(c => c.path).join(', ');
+      return {
+        reply: `🛠️ *${treeChanges.length} change(s) staged for \`${owner}/${repo}\`*\n\n📝 _${msg}_\n📂 Files: ${files}\n\nReply with \`approve\` to commit, or \`reject\` to discard.`,
+        updatedMessages: currentMessages,
+        pendingChanges: { repo: `${owner}/${repo}`, owner, repoName: repo, commitMessage: msg, changes: treeChanges, chatId }
+      };
     }
   }
 

@@ -2,17 +2,19 @@ import { requireSession, fetchFile, getDefaultBranch, getRepoFilePaths, applyAnd
 import { callAI, callAIRaw, callChatWithTools } from '../services/ai.js';
 import { MULTI_PATCH_PROMPT, FILES_PICKER_PROMPT, PR_DESCRIPTION_PROMPT, CHAT_SYSTEM_PROMPT } from '../core/prompts.js';
 import { chatHistories, saveHistories } from './chat.js';
-import { pendingActions, generateActionId } from '../core/pending.js';
+import { setPendingAction, getPendingAction, deletePendingAction, generateActionId } from '../core/pending.js';
 import { uploadAuditLogTo0G } from '../services/zerog.js';
 import { triggerBackgroundSync } from '../services/sync.js';
 import config from '../core/config.js';
 import { getUserSession, saveUserSession } from '../services/supabase.js';
 import { hasFeature, commandLimitMessage, premiumFeatureMessage } from '../services/subscription.js';
+import { checkBotRateLimit } from '../core/rate-limit.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import solc from 'solc';
 import child_process from 'child_process';
+import crypto from 'crypto';
 import util from 'util';
 
 const exec = util.promisify(child_process.exec);
@@ -48,7 +50,7 @@ async function gatePremium(chatId, feature, minTier = null) {
 async function verifyBuildSandbox(filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
   const tmpDir = os.tmpdir();
-  const tmpFile = path.join(tmpDir, `aircommit-val-${Date.now()}${ext}`);
+  const tmpFile = path.join(tmpDir, `aircommit-val-${crypto.randomBytes(8).toString('hex')}${ext}`);
 
   try {
     if (ext === '.js') {
@@ -99,6 +101,12 @@ export function registerCodeCommands(bot, sendStatus) {
       return bot.sendMessage(chatId, gate.message);
     }
 
+    // Check rate limit
+    const rl = checkBotRateLimit(chatId, 'heavy');
+    if (rl) {
+      return bot.sendMessage(chatId, rl);
+    }
+
     const status = await sendStatus(chatId, '⏳ Connecting to pipelines...');
 
     try {
@@ -123,7 +131,7 @@ export function registerCodeCommands(bot, sendStatus) {
       if (!patch.patches || patch.patches.length === 0) throw new Error('AI returned no patches.');
 
       const actionId = generateActionId();
-      pendingActions.set(actionId, {
+      setPendingAction(actionId, {
         type: 'patch',
         octokit, owner, repo, filePath,
         content, sha,
@@ -155,6 +163,12 @@ export function registerCodeCommands(bot, sendStatus) {
     const gate = await gatePremium(chatId, 'smart', 'starter');
     if (!gate.allowed) {
       return bot.sendMessage(chatId, gate.message);
+    }
+
+    // Check rate limit
+    const rl = checkBotRateLimit(chatId, 'heavy');
+    if (rl) {
+      return bot.sendMessage(chatId, rl);
     }
 
     // Seed chat history with context so follow-ups remember the task
@@ -203,7 +217,7 @@ export function registerCodeCommands(bot, sendStatus) {
       }
 
       const actionId = generateActionId();
-      pendingActions.set(actionId, {
+      setPendingAction(actionId, {
         type: 'smart_patch',
         octokit, owner, repo, files,
         patches: result.patches,
@@ -243,6 +257,12 @@ export function registerCodeCommands(bot, sendStatus) {
     const gate = await gatePremium(chatId, 'pr_review', 'pro');
     if (!gate.allowed) {
       return bot.sendMessage(chatId, gate.message);
+    }
+
+    // Check rate limit
+    const rl = checkBotRateLimit(chatId, 'heavy');
+    if (rl) {
+      return bot.sendMessage(chatId, rl);
     }
 
     const status = await sendStatus(chatId, '🌿 Spinning up Pull Request pipeline...');
@@ -339,6 +359,12 @@ export function registerCodeCommands(bot, sendStatus) {
       return bot.sendMessage(chatId, gate.message);
     }
 
+    // Check rate limit
+    const rl = checkBotRateLimit(chatId, 'heavy');
+    if (rl) {
+      return bot.sendMessage(chatId, rl);
+    }
+
     const status = await sendStatus(chatId, `🔨 Creating file \`${filePath}\`...`);
     try {
       const { octokit, owner, repo } = await requireSession(chatId);
@@ -348,7 +374,7 @@ export function registerCodeCommands(bot, sendStatus) {
       );
 
       const actionId = generateActionId();
-      pendingActions.set(actionId, {
+      setPendingAction(actionId, {
         type: 'create',
         octokit, owner, repo, filePath, content,
         commitMessage: `feat: create ${filePath}`
@@ -482,7 +508,15 @@ Return ONLY a valid JSON object matching this schema:
       });
 
       if (commits.length === 0) {
-        await status.update(`❌ No commits found for file: \`${filePath}\``);
+        await status.delete();
+        bot.sendMessage(chatId,
+          `⏪ *No commits found for \`${filePath}\`*\n\n` +
+          `This file has no commit history — it may have been created directly or never changed.\n\n` +
+          `Suggestions:\n` +
+          `• Use \`/fix\` to rewrite the file with AI help\n` +
+          `• Use \`/smart\` to refactor the code`,
+          { parse_mode: 'Markdown' }
+        );
         return;
       }
 
@@ -513,7 +547,7 @@ Return ONLY a valid JSON object matching this schema:
 
     if (data.startsWith('approve_action:')) {
       const actionId = data.split(':')[1];
-      const action = pendingActions.get(actionId);
+      const action = getPendingAction(actionId);
       if (!action) return bot.answerCallbackQuery(query.id, { text: 'Action expired or not found.' });
 
       bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: query.message.message_id });
@@ -543,7 +577,7 @@ Return ONLY a valid JSON object matching this schema:
           successMsg = `✅ *File Created Live!*\n\n📄 File: \`${action.filePath}\``;
         }
 
-        pendingActions.delete(actionId);
+        deletePendingAction(actionId);
 
         try {
           const session = await requireSession(chatId);
@@ -567,6 +601,9 @@ Return ONLY a valid JSON object matching this schema:
 
         // Upload audit log to 0G decentralized storage
         await status.update(`${successMsg}\n\n🌐 _Uploading audit log to 0G..._`);
+        let auditSuccess = false;
+        let auditResult = null;
+        let auditErr = null;
         try {
           const auditLog = {
             timestamp: new Date().toISOString(),
@@ -578,21 +615,35 @@ Return ONLY a valid JSON object matching this schema:
             approvedByChatId: chatId,
             buildVerification, // Add build sandbox validation
           };
-          const result = await uploadAuditLogTo0G(auditLog);
-          if (result) {
+          // Retry once on failure (transient network issue)
+          try {
+            auditResult = await uploadAuditLogTo0G(auditLog);
+          } catch (retryErr) {
+            console.warn('[Audit] 0G upload failed, retrying once...', retryErr.message);
+            auditResult = await uploadAuditLogTo0G(auditLog);
+          }
+          if (auditResult) {
+            auditSuccess = true;
             await status.update(
               `${successMsg}\n\n` +
               `⚙️ *Build Sandbox:* \`${buildVerification.status}\`\n` +
               `🌐 *0G Audit Trail*\n` +
-              `🔐 Root Hash: \`${result.rootHash}\`\n` +
-              `🔗 Tx: \`${result.txHash}\``
+              `🔐 Root Hash: \`${auditResult.rootHash}\`\n` +
+              `🔗 Tx: \`${auditResult.txHash}\``
             );
-          } else {
-            await status.update(successMsg + '\n\n_ℹ️ 0G audit skipped (ZEROG\\_PRIVATE\\_KEY not set)_');
           }
         } catch (zerogErr) {
-          console.error('0G upload error:', zerogErr.message);
-          await status.update(successMsg + `\n\n⚠️ _0G audit upload failed: ${zerogErr.message}_`);
+          auditErr = zerogErr;
+          console.error('[Audit] 0G upload failed after retry:', zerogErr.message);
+        }
+
+        // Warn the user if audit trail is incomplete
+        if (!auditSuccess) {
+          const warnMsg = `${successMsg}\n\n` +
+            `⚙️ *Build Sandbox:* \`${buildVerification.status}\`\n` +
+            `⚠️ *0G audit trail incomplete* — your changes were committed successfully, but the decentralized log could not be stored.\n` +
+            (auditErr ? `_(Reason: ${auditErr.message}_)` : '');
+          await status.update(warnMsg);
         }
       } catch (error) {
         await status.update(`❌ Commit failed: ${error.message}`);

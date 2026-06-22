@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import http from 'http';
 
@@ -13,8 +14,8 @@ import { saveHistories, chatHistories } from './commands/chat.js';
 import { requireSession, fetchFile, invalidateFileTree } from './services/github.js';
 import { triggerBackgroundSync } from './services/sync.js';
 import { verifyOAuthState } from './commands/auth.js';
-import { connectRedis, disconnectRedis } from './services/cache.js';
-import { initWebSocket, upgradeWebSocket } from './services/websocket.js';
+import { connectRedis, disconnectRedis, isRedisConnected } from './services/cache.js';
+import { initWebSocket, upgradeWebSocket, closeWebSocket } from './services/websocket.js';
 import { getZeroGModels } from './services/zerog-models.js';
 import { downloadChatArchiveFrom0G } from './services/zerog.js';
 
@@ -33,6 +34,9 @@ import {
   bodySizeLimit,
   SimpleRateLimiter
 } from './core/security.js';
+
+// Import fetchWithTimeout for timeout-safe external HTTP requests
+import { fetchWithTimeout } from './core/fetch-timeout.js';
 
 import { registerAuthCommands } from './commands/auth.js';
 import { registerRepoCommands } from './commands/repo.js';
@@ -115,7 +119,14 @@ app.use(cors({
 }));
 
 // Request size limits
-app.use('/webhook/', express.raw({ type: 'application/json', limit: '1mb' }));
+// Parse JSON bodies and capture raw body for HMAC verification
+app.use('/webhook/', (req, res, next) => {
+  express.json({
+    type: 'application/json',
+    limit: '1mb',
+    verify: (r, _res, buf) => { req.rawBody = buf.toString('utf-8'); }
+  })(req, res, next);
+});
 app.use('/auth/', bodySizeLimit('500kb'));
 app.use(bodySizeLimit('100kb'));
 
@@ -144,14 +155,62 @@ const botRateLimiter = new SimpleRateLimiter(60000, 20); // 20 commands per minu
 app.use('/auth/', authLimiter);
 app.use('/webhook/github', apiLimiter);
 
+// ─── Command Logging ─────────────────────────────────────────────────────────
+// Logs command usage for analytics — privacy-safe (no message body, no user content)
+
+const COMMAND_LOG_FILE = path.resolve('./command_log.json');
+const MAX_LOG_ENTRIES = 10000; // Rotate at this size
+
+function loadCommandLog() {
+  try {
+    if (fs.existsSync(COMMAND_LOG_FILE)) {
+      const raw = fs.readFileSync(COMMAND_LOG_FILE, 'utf-8');
+      return JSON.parse(raw);
+    }
+  } catch (e) {
+    logger.warn({ component: 'command-log', error: e.message }, 'Failed to load command log');
+  }
+  return [];
+}
+
+let commandLog = loadCommandLog();
+console.log(`📊 Loaded ${commandLog.length} command log entries.`);
+
+/**
+ * Log a command usage event. Does NOT log message content.
+ */
+function logCommandUsage(chatId, command, metadata = {}) {
+  try {
+    commandLog.push({
+      timestamp: new Date().toISOString(),
+      chatId: String(chatId),
+      command,
+      ...metadata
+    });
+    // Trim to max entries
+    if (commandLog.length > MAX_LOG_ENTRIES) {
+      commandLog = commandLog.slice(-MAX_LOG_ENTRIES);
+    }
+    // Persist to disk
+    fs.writeFileSync(COMMAND_LOG_FILE, JSON.stringify(commandLog, null, 2));
+  } catch (e) {
+    logger.warn({ component: 'command-log', error: e.message }, 'Failed to persist command log');
+  }
+}
+
+/**
+ * Save command log to disk (for graceful shutdown)
+ */
+function saveCommandLog() {
+  try {
+    fs.writeFileSync(COMMAND_LOG_FILE, JSON.stringify(commandLog, null, 2));
+  } catch (e) {
+    logger.warn({ component: 'command-log', error: e.message }, 'Failed to save command log on shutdown');
+  }
+}
+
 function verifyGithubWebhookSignature(rawBody, signatureHeader) {
   if (!rawBody || !signatureHeader) return false;
-
-  // Validate webhook secret exists
-  if (!config.githubWebhookSecret || config.githubWebhookSecret.length < 32) {
-    logger.error({ component: 'webhook' }, 'Webhook secret is missing or too short');
-    return false;
-  }
 
   const [algorithm, signature] = signatureHeader.split('=');
   if (algorithm !== 'sha256' || !signature) return false;
@@ -193,11 +252,38 @@ if (config.webhookUrl) {
 
 // Prevent Node.js from crashing entirely on unhandled fetch errors from underlying undici/node-fetch
 process.on('uncaughtException', (err) => {
-  if (err.message === 'fetch failed' || err.code === 'EFATAL' || err.code === 'ECONNRESET') {
+  const transient = err.message === 'fetch failed' || err.code === 'EFATAL' || err.code === 'ECONNRESET';
+  if (transient) {
     logger.warn({ component: 'process', error: err.message }, 'Ignored transient network exception');
     return;
   }
   logger.fatal({ component: 'process', error: err }, 'Uncaught Exception');
+  saveHistories();
+  saveCommandLog();
+});
+
+// ─── Global Command Logging Interceptor ───────────────────────────────────────
+// Logs all bot commands before they're processed by specific modules
+
+bot.on('message', async (msg) => {
+  const text = msg.text || '';
+  const chatId = msg.chat?.id;
+  if (!chatId) return;
+
+  // Match commands (starts with / followed by alphanumeric)
+  const cmdMatch = text.match(/^\/([a-zA-Z0-9_]+)/);
+  if (cmdMatch) {
+    const fullCommand = cmdMatch[0];
+    const command = cmdMatch[1].toLowerCase();
+    const isCallback = !!msg.callback_query;
+
+    logCommandUsage(chatId, command, {
+      isCallback,
+      isVoice: !!msg.voice,
+      isPhoto: !!msg.photo?.length,
+      commandLength: fullCommand.length
+    });
+  }
 });
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -236,7 +322,7 @@ app.get('/auth/github/callback', async (req, res) => {
   }
 
   try {
-    const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+    const tokenRes = await fetchWithTimeout('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -247,7 +333,7 @@ app.get('/auth/github/callback', async (req, res) => {
         client_secret: config.githubClientSecret,
         code
       })
-    });
+    }, 15000);
 
     const tokenData = await tokenRes.json();
     if (tokenData.error) throw new Error(tokenData.error_description || tokenData.error);
@@ -255,9 +341,9 @@ app.get('/auth/github/callback', async (req, res) => {
     const accessToken = tokenData.access_token;
 
     // ─── Validate token scopes ─────────────────────────────────────
-    const scopeCheckRes = await fetch('https://api.github.com/user', {
+    const scopeCheckRes = await fetchWithTimeout('https://api.github.com/user', {
       headers: { 'Authorization': `token ${accessToken}`, 'User-Agent': 'AirCommit' }
-    });
+    }, 15000);
     const scopes = scopeCheckRes.headers.get('x-oauth-scopes') || '';
     const userData = await scopeCheckRes.json();
 
@@ -311,7 +397,7 @@ app.get('/auth/github/callback', async (req, res) => {
     bot.sendMessage(chatId, `✅ Successfully linked GitHub account: *${userData.login}*\n\nUse \`/repos\` to list your repositories, then \`/use <owner>/<repo>\` to select one.`, { parse_mode: 'Markdown' });
   } catch (error) {
     logger.error({ component: 'oauth', error: error.message }, 'OAuth error');
-    res.status(500).send('Authentication failed: ' + error.message);
+    res.status(500).send('Authentication failed. Please try again or contact support if the issue persists.');
   }
 });
 
@@ -387,18 +473,110 @@ app.post('/webhook/github', async (req, res) => {
 });
 
 // ─── Health Check Endpoint ─────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    version: '1.0.0',
-    environment: process.env.NODE_ENV || 'development'
-  });
+// Rate-limited health check (10 req/min) to prevent abuse
+const healthLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // limit each IP to 10 health checks per windowMs
+  message: { error: 'Too many health check requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/health', healthLimiter);
+app.get('/health', async (req, res) => {
+  try {
+    const start = Date.now();
+    const checks = {
+      telegram: false,
+      supabase: false,
+      redis: 'skipped',
+      zerog: false,
+    };
+    let status = 'ok';
+
+    // ─── Telegram Bot Check ─────────────────────────────────────────────────
+    try {
+      const me = await bot.getMe();
+      checks.telegram = !!me;
+    } catch (err) {
+      checks.status = 'degraded';
+    }
+
+    // ─── Supabase Check (only if configured) ────────────────────────────────
+    if (config.supabaseUrl && config.supabaseKey) {
+      try {
+        const supabase = getSupabase();
+        if (supabase) {
+          const { error } = await supabase.from('users').select('id').limit(1);
+          checks.supabase = !error;
+        } else {
+          checks.supabase = false;
+        }
+      } catch {
+        checks.supabase = false;
+        status = 'degraded';
+      }
+    } else {
+      checks.supabase = 'skipped';
+    }
+
+    // ─── Redis Check (only if configured) ───────────────────────────────────
+    if (isRedisConnected()) {
+      checks.redis = true;
+    } else if (process.env.REDIS_URL || process.env.REDIS_PASSWORD) {
+      checks.redis = 'failed';
+      status = 'degraded';
+    }
+
+    // ─── 0G Check (only if configured) ──────────────────────────────────────
+    if (config.zerogPrivateKey) {
+      try {
+        await fetch(config.zerogEvmRpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 }),
+          signal: AbortSignal.timeout(3000)
+        });
+        checks.zerog = true;
+      } catch {
+        status = 'degraded';
+      }
+    } else {
+      checks.zerog = 'skipped';
+    }
+
+    const latency = Date.now() - start;
+
+    res.json({
+      status,
+      uptime: Math.round(process.uptime()),
+      latencyMs: latency,
+      timestamp: new Date().toISOString(),
+      version: '1.0.0',
+      environment: process.env.NODE_ENV || 'development',
+      checks
+    });
+  } catch (err) {
+    logger.error({ component: 'health', error: err.message }, 'Health check failed');
+    res.status(500).json({ status: 'error', message: 'Health check unavailable' });
+  }
 });
 
-app.get('/editor', (req, res) => {
-  res.sendFile(path.resolve('./src/public/editor.html'));
+app.get('/editor', async (req, res) => {
+  const { chatId } = req.query;
+  // Require authenticated session — prevent unauthenticated access to Monaco editor
+  if (!chatId || typeof chatId !== 'string') {
+    return res.status(401).send('Unauthorized: chatId query parameter required');
+  }
+  try {
+    const session = await getUserSession(chatId);
+    if (!session || !session.github_token || !session.active_owner || !session.active_repo) {
+      return res.status(401).send('Unauthorized: must be logged in and have a repo selected');
+    }
+    res.sendFile(path.resolve('./src/public/editor.html'));
+  } catch (error) {
+    logger.error({ component: 'editor', error: error.message }, 'Editor access error');
+    res.status(500).send('Editor unavailable');
+  }
 });
 
 app.get('/api/file', async (req, res) => {
@@ -433,7 +611,7 @@ app.get('/api/file', async (req, res) => {
     res.json({ content });
   } catch (error) {
     reqLogger.error({ error: error.message }, 'File fetch error');
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to fetch file. Check that the file exists and you have access.' });
   }
 });
 
@@ -448,13 +626,13 @@ async function warmServices() {
     logger.info({ component: 'warmup' }, 'Warming up services...');
 
     // Connect Redis (non-blocking, skip if not available)
-    // await connectRedis().catch(() => { }); // Disabled - Redis not installed
+    connectRedis().catch(err => logger.warn({ component: 'warmup', error: err.message }, 'Redis warm-up skipped'));
 
     // Pre-fetch 0G models (non-blocking)
-    getZeroGModels().catch(() => { });
+    getZeroGModels().catch(err => logger.warn({ component: 'warmup', error: err.message }, '0G models warm-up skipped'));
 
     // Restore chat history from 0G (non-blocking)
-    restoreChatHistoryFrom0G().catch(() => { });
+    restoreChatHistoryFrom0G().catch(err => logger.warn({ component: 'warmup', error: err.message }, 'Chat history restore skipped'));
 
     logger.info({ component: 'warmup' }, 'Service warm-up complete');
   } catch (error) {
@@ -494,7 +672,13 @@ async function restoreChatHistoryFrom0G() {
         if (data?.root_hash) {
           const archive = await downloadChatArchiveFrom0G(data.root_hash);
           if (archive && typeof archive.payload === 'string') {
-            const history = JSON.parse(archive.payload);
+            let history;
+            try {
+              history = JSON.parse(archive.payload);
+            } catch (parseErr) {
+              logger.warn({ component: '0g', chatId, error: parseErr.message }, 'Failed to parse archived history JSON');
+              continue;
+            }
             if (Array.isArray(history)) {
               chatHistories.set(chatId, history);
               logger.info({ component: '0g', chatId, messageCount: history.length }, 'Restored chat history');
@@ -566,7 +750,7 @@ async function safeSend(chatId, text, extra = {}) {
 }
 
 // ─── Register Commands ────────────────────────────────────────────────────────
-registerAuthCommands(bot);
+registerAuthCommands(bot, sendStatus);
 registerRepoCommands(bot);
 registerCodeCommands(bot, sendStatus);
 registerChatCommands(bot, sendStatus, safeSend);
@@ -587,7 +771,14 @@ registerPaymentCommands(bot);
 bot.on('web_app_data', async (msg) => {
   const chatId = msg.chat.id;
   try {
-    const payload = JSON.parse(msg.web_app_data.data);
+    let payload;
+    try {
+      payload = JSON.parse(msg.web_app_data.data);
+    } catch (parseErr) {
+      logger.warn({ component: 'editor', chatId, error: parseErr.message }, 'Invalid JSON in web_app_data');
+      await sendStatus(chatId, '❌ Invalid data format');
+      return;
+    }
     if (payload.action !== 'save_file') return;
 
     const { filePath, newContent } = payload;
@@ -644,19 +835,29 @@ bot.on('web_app_data', async (msg) => {
 });
 
 // ─── Crash Resistance ────────────────────────────────────────────────────────
-process.on('uncaughtException', (err) => {
-  logger.fatal({ component: 'process', error: err }, 'Uncaught Exception');
-  saveHistories();
-});
-
-process.on('unhandledRejection', (reason) => {
-  logger.error({ component: 'process', reason }, 'Unhandled Rejection');
-});
+// Note: The main uncaughtException/unhandledRejection handlers are defined
+// earlier in this file to avoid overwriting them.  SIGINT handles graceful
+// shutdown with chat-history persistence.
 
 process.on('SIGINT', async () => {
   logger.info({ component: 'process' }, 'Shutting down — saving chat history...');
+
+  // 1. Stop accepting new connections
+  httpServer.close();
+
+  // 2. Save chat history to disk
   saveHistories();
+
+  // 3. Save command log to disk
+  saveCommandLog();
+
+  // 4. Close WebSocket connections gracefully
+  closeWebSocket();
+
+  // 5. Disconnect Redis if connected
   await disconnectRedis();
+
+  logger.info({ component: 'process' }, 'Shutdown complete');
   process.exit(0);
 });
 

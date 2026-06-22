@@ -4,17 +4,38 @@ import crypto from 'crypto';
 import config from '../core/config.js';
 
 const ALGORITHM = 'aes-256-gcm';
+let _encryptionKey = null;
+let _encryptionKeyVolatile = false;
 
 function getEncryptionKey() {
-  if (config.encryptionKey) {
-    return Buffer.from(config.encryptionKey, 'hex');
+  if (!_encryptionKey) {
+    if (config.encryptionKey) {
+      const hex = config.encryptionKey.trim();
+      if (hex.length !== 64) {
+        console.error('[FATAL] ENCRYPTION_KEY must be a 32-byte (64-char) hex string. Aborting.');
+        process.exit(1);
+      }
+      _encryptionKey = Buffer.from(hex, 'hex');
+      _encryptionKeyVolatile = false;
+    } else {
+      // Check if there are existing encrypted tokens in the DB
+      console.warn(
+        '[FATAL] ENCRYPTION_KEY not set. ' +
+        'All encrypted tokens (GitHub PATs, OpenRouter keys, 0G keys) will become unreadable after restart. ' +
+        'Set ENCRYPTION_KEY= in your .env file. Aborting.'
+      );
+      process.exit(1);
+    }
   }
+  return _encryptionKey;
+}
 
-  return crypto.createHash('sha256').update([
-    config.token,
-    config.openrouterKey,
-    config.githubClientSecret || ''
-  ].join(':')).digest();
+/**
+ * Return true if the runtime encryption key is volatile (not persisted via ENCRYPTION_KEY env var).
+ */
+export function isEncryptionKeyVolatile() {
+  try { getEncryptionKey(); } catch { /* ignored */ }
+  return _encryptionKeyVolatile;
 }
 
 export function encrypt(text) {
@@ -27,10 +48,13 @@ export function encrypt(text) {
   return `${iv.toString('hex')}:${authTag}:${encrypted}`;
 }
 
+/**
+ * Decrypt an encrypted value. Returns null on failure (never returns plaintext on error).
+ */
 export function decrypt(text) {
-  if (!text || !text.includes(':')) return text;
+  if (!text || typeof text !== 'string' || !text.includes(':')) return null;
   const parts = text.split(':');
-  if (parts.length !== 3) return text;
+  if (parts.length !== 3) return null;
   try {
     const iv = Buffer.from(parts[0], 'hex');
     const authTag = Buffer.from(parts[1], 'hex');
@@ -41,8 +65,8 @@ export function decrypt(text) {
     decrypted += decipher.final('utf8');
     return decrypted;
   } catch (e) {
-    console.error('Decryption failed:', e.message);
-    return text; // Return raw text if decryption fails (e.g. legacy plain text tokens)
+    console.error('[Security] Decryption failed:', e.message);
+    return null; // Never return raw ciphertext — caller must handle
   }
 }
 
@@ -59,6 +83,23 @@ if (config.supabaseUrl && config.supabaseKey) {
 }
 
 const memorySessions = new Map();
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Cleans up expired sessions from the in-memory store.
+ * Runs periodically to prevent token accumulation.
+ */
+function cleanupExpiredSessions() {
+  const now = Date.now();
+  for (const [chatId, session] of memorySessions.entries()) {
+    if (session._expiresAt && session._expiresAt < now) {
+      memorySessions.delete(chatId);
+    }
+  }
+}
+
+// Auto-cleanup every 10 minutes; unref so it doesn't block process exit
+setInterval(cleanupExpiredSessions, 10 * 60 * 1000).unref?.();
 
 function normalizeChatId(chatId) {
   if (chatId === null || chatId === undefined) return '';
@@ -143,6 +184,11 @@ export async function saveUserSession(chatId, sessionData) {
   const merged = { ...existing, ...sessionData };
 
   const payload = { chat_id: chatId.toString(), ...merged };
+
+  // Set expiry for in-memory sessions (24h TTL)
+  if (!supabase) {
+    payload._expiresAt = Date.now() + SESSION_TTL;
+  }
 
   if (payload.github_token && !isEncryptedValue(payload.github_token)) {
     payload.github_token = encrypt(payload.github_token);

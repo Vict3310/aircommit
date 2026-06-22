@@ -2,13 +2,30 @@ import fs from 'fs';
 import path from 'path';
 import { CHAT_SYSTEM_PROMPT } from '../core/prompts.js';
 import { callChatWithTools } from '../services/ai.js';
-import { getUserSession } from '../services/supabase.js';
-import { uploadChatArchiveTo0G } from '../services/zerog.js';
+import { getUserSession, saveUserSession } from '../services/supabase.js';
+import { uploadChatArchiveTo0G, uploadAuditLogTo0G } from '../services/zerog.js';
+import { commitChangesWithTree, getDefaultBranch, createWriteOctokit, invalidateFileTree } from '../services/github.js';
 import config from '../core/config.js';
 import { encrypt } from '../services/supabase.js';
+import { fetchWithTimeout } from '../core/fetch-timeout.js';
 
 const HISTORY_FILE = path.resolve('./chat_history.json');
 const MAX_HISTORY = 20;
+const MAX_CHATS = 500; // LRU bound: evict least recently active chats when map exceeds this
+const INACTIVE_CHAT_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/**
+ * Last-chance TTL for inactive chat histories (purged on save).
+ */
+function purgeStaleChats() {
+  const now = Date.now();
+  for (const [chatId, meta] of Object.entries(chatHistories.metadata || {})) {
+    if (meta.lastActive && (now - meta.lastActive) > INACTIVE_CHAT_TTL) {
+      chatHistories.delete(chatId);
+      if (chatHistories.metadata) delete chatHistories.metadata[chatId];
+    }
+  }
+}
 
 function loadHistories() {
   try {
@@ -23,15 +40,17 @@ function loadHistories() {
 }
 
 export function saveHistories() {
+  purgeStaleChats();
   try {
     const obj = Object.fromEntries(chatHistories);
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(obj, null, 2));
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify({ ...obj, _metadata: chatHistories.metadata }, null, 2));
   } catch (e) {
     console.error('Failed to save chat history:', e.message);
   }
 }
 
 export const chatHistories = loadHistories();
+chatHistories.metadata = chatHistories.metadata || {};
 console.log(`💾 Loaded chat histories from local file for ${chatHistories.size} conversation(s).`);
 
 /**
@@ -134,6 +153,23 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
 
       if (!chatHistories.has(chatId)) {
         chatHistories.set(chatId, [{ role: 'system', content: CHAT_SYSTEM_PROMPT }]);
+        chatHistories.metadata[chatId] = { lastActive: Date.now() };
+        // LRU eviction: when map exceeds MAX_CHATS, evict the least recently active chat
+        if (chatHistories.size > MAX_CHATS) {
+          let oldestKey = null;
+          let oldestTime = Infinity;
+          for (const [key, meta] of Object.entries(chatHistories.metadata)) {
+            if (meta.lastActive < oldestTime) {
+              oldestTime = meta.lastActive;
+              oldestKey = key;
+            }
+          }
+          if (oldestKey) {
+            chatHistories.delete(oldestKey);
+            delete chatHistories.metadata[oldestKey];
+            console.log(`[Chat] Evicted least active chat ${oldestKey} (LRU, size=${chatHistories.size}/${MAX_CHATS})`);
+          }
+        }
       }
       const history = chatHistories.get(chatId);
 
@@ -173,19 +209,85 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
         } catch (_) { }
       };
 
-      let reply, updatedMessages;
+      let reply, updatedMessages, pendingChanges;
       try {
-        ({ reply, updatedMessages } = await callChatWithTools(chatId, history, editStatus, hasImage));
+        ({ reply, updatedMessages, pendingChanges } = await callChatWithTools(chatId, history, editStatus, hasImage));
       } finally {
         clearInterval(typingInterval);
         bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
       }
 
       chatHistories.set(chatId, updatedMessages);
+      chatHistories.metadata[chatId] = { lastActive: Date.now() };
       saveHistories();
 
       // Auto-archive substantial conversations to 0G
       autoArchiveChatTo0G(chatId);
+
+      // Handle approve/reject for pending chat changes
+      const normalizedText = (text || '').trim().toLowerCase();
+      if (pendingChanges && normalizedText === 'approve') {
+        try {
+          const { changes, commitMessage, owner, repoName, chatId: pcChatId } = pendingChanges;
+          const writeOctokit = createWriteOctokit(session.github_token);
+          const defaultBranch = await getDefaultBranch(writeOctokit, owner, repoName);
+          await commitChangesWithTree(writeOctokit, owner, repoName, defaultBranch, commitMessage, changes);
+          await invalidateFileTree(owner, repoName);
+
+          // Track in session history
+          const actionHistory = session.action_history || [];
+          actionHistory.push({ action: commitMessage, file: changes.map(c => c.path).join(', '), timestamp: new Date().toISOString() });
+          await saveUserSession(pcChatId, { action_history: actionHistory.slice(-50) });
+
+          // Upload audit to 0G
+          const auditData = {
+            timestamp: new Date().toISOString(),
+            type: 'agent_edit',
+            repo: `${owner}/${repoName}`,
+            commitMessage,
+            steps: changes.map(c => ({ file: c.path, action: c.action, status: '✅' })),
+            approvedByChatId: pcChatId,
+          };
+          let zgRes;
+          let zgErr = null;
+          try {
+            // Retry once on failure (transient network issue)
+            try {
+              zgRes = await uploadAuditLogTo0G(auditData);
+            } catch (retryErr) {
+              console.warn('[Audit] 0G upload failed, retrying once...', retryErr.message);
+              zgRes = await uploadAuditLogTo0G(auditData);
+            }
+          } catch (e) {
+            zgErr = e;
+          }
+          if (zgRes) {
+            await safeSend(pcChatId, `✅ Changes committed & logged to 0G!\nTx: \`${zgRes.txHash}\``);
+          } else {
+            const warnMsg = `✅ Changes committed!\n\n⚠️ *0G audit trail incomplete* — your changes were committed successfully, but the decentralized log could not be stored.\n` +
+              (zgErr ? `_(Reason: ${zgErr.message}_)` : '');
+            await safeSend(pcChatId, warnMsg);
+          }
+        } catch (commitErr) {
+          await safeSend(chatId, `❌ Commit failed: ${commitErr.message}`);
+        }
+        return; // Don't send the pending changes prompt reply after approval
+      } else if (pendingChanges && normalizedText === 'reject') {
+        await safeSend(chatId, `🗑️ Changes discarded.`);
+        return; // Don't send the pending changes prompt reply after rejection
+      }
+
+      if (pendingChanges) {
+        // Send the pending changes prompt
+        if (reply.length > 4000) {
+          for (let i = 0; i < reply.length; i += 4000) {
+            await safeSend(chatId, reply.slice(i, i + 4000));
+          }
+        } else {
+          await safeSend(chatId, reply);
+        }
+        return; // Don't process further — user needs to approve/reject
+      }
 
       if (reply.length > 4000) {
         for (let i = 0; i < reply.length; i += 4000) {
@@ -207,9 +309,19 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
     const status = await sendStatus(chatId, `🎙️ Transcribing voice command...`);
     try {
       const fileUrl = await bot.getFileLink(voiceFileId);
-      const fileRes = await fetch(fileUrl);
+      const fileRes = await fetchWithTimeout(fileUrl, {}, 10000);
       if (!fileRes.ok) throw new Error('Failed to download voice file from Telegram.');
       const fileBuffer = await fileRes.arrayBuffer();
+
+      // Validate that the file is actually an OGG container (magic bytes: "OggS")
+      if (fileBuffer.byteLength < 4) {
+        throw new Error('Voice file is too small to be valid.');
+      }
+      const header = new Uint8Array(fileBuffer.slice(0, 4));
+      const magic = String.fromCharCode(...header);
+      if (magic !== 'OggS') {
+        throw new Error('Uploaded file is not a valid OGG audio file.');
+      }
 
       const formData = new FormData();
       const blob = new Blob([fileBuffer], { type: 'audio/ogg' });
@@ -230,7 +342,7 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
 
       formData.append('model', modelName);
 
-      const res = await fetch(apiUrl, { method: 'POST', headers, body: formData });
+      const res = await fetchWithTimeout(apiUrl, { method: 'POST', headers, body: formData }, 30000);
       if (!res.ok) throw new Error(`Transcription failed: ${res.statusText}`);
 
       const json = await res.json();

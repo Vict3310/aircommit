@@ -111,10 +111,14 @@ const config = {
   zerogPrivateKey: process.env.ZEROG_PRIVATE_KEY,
   zerogEvmRpc: process.env.ZEROG_EVM_RPC_URL || 'https://evmrpc-testnet.0g.ai',
   zerogIndexerRpc: process.env.ZEROG_INDEXER_RPC_URL || 'https://indexer-storage-testnet-standard.0g.ai',
+  zerogFallbackNodes: process.env.ZEROG_FALLBACK_NODES || 'https://rpc-storage-testnet.0g.ai',
 
   // Payment & subscription config
+  // WARNING: These values are shown to users for manual payments.
+  // MUST be set via environment variables before production.
+  // Zero-address defaults below are NOT real — they will leak funds.
   adminChatIds: process.env.ADMIN_CHAT_IDS || '',
-  paymentBankAccount: process.env.PAYMENT_BANK_ACCOUNT || '7012345678',
+  paymentBankAccount: process.env.PAYMENT_BANK_ACCOUNT || '__PLACEHOLDER_SET_REAL_VALUE__',
   paymentUsdtBsc: process.env.PAYMENT_USDT_BSC || '0x0000000000000000000000000000000000000000',
   paymentBnbBsc: process.env.PAYMENT_BNB_BSC || '0x0000000000000000000000000000000000000000',
 
@@ -125,6 +129,21 @@ const config = {
 // Runtime security check for webhook secret (in case it was loaded late)
 if (config.webhookUrl && (!config.githubWebhookSecret || config.githubWebhookSecret.length < MIN_WEBHOOK_SECRET_LENGTH)) {
   console.error('[Security] GITHUB_WEBHOOK_SECRET is required and must be at least 32 characters when WEBHOOK_URL is set.');
+  process.exit(1);
+}
+
+// Runtime check: warn if payment placeholders are still set to zero/placeholder values
+const zeroAddress = '0x0000000000000000000000000000000000000000';
+if (config.paymentUsdtBsc === zeroAddress) {
+  console.error('[CRITICAL] PAYMENT_USDT_BSC is set to a zero-address placeholder. Users sending USDT will LOSE funds. Set PAYMENT_USDT_BSC in your .env before going live.');
+  process.exit(1);
+}
+if (config.paymentBnbBsc === zeroAddress) {
+  console.error('[CRITICAL] PAYMENT_BNB_BSC is set to a zero-address placeholder. Users sending BNB will LOSE funds. Set PAYMENT_BNB_BSC in your .env before going live.');
+  process.exit(1);
+}
+if (config.paymentBankAccount === '__PLACEHOLDER_SET_REAL_VALUE__') {
+  console.error('[CRITICAL] PAYMENT_BANK_ACCOUNT is set to a placeholder. Update PAYMENT_BANK_ACCOUNT in your .env before going live.');
   process.exit(1);
 }
 

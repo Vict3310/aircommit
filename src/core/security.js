@@ -7,13 +7,16 @@
 import crypto from 'crypto';
 import express from 'express';
 
+import logger from './logger.js';
+
 // ─── Security Constants ────────────────────────────────────────────────────────
 
 const NONCE_LENGTH = 32;
 const HASH_ALGORITHM = 'sha256';
 
-// Safe characters for file paths
-const SAFE_PATH_REGEX = /^[a-zA-Z0-9/_\-+.~()@#$%^&!={}[\]<>?;,'`[\]|\s]+$/;
+// Safe characters for file paths - GitHub allows alphanumerics, dots, hyphens, underscores,
+// slashes, @, +, and some Unicode. We restrict to the safest subset.
+const SAFE_PATH_REGEX = /^[a-zA-Z0-9/_\-.~@+]+$/;
 const MAX_PATH_LENGTH = 1024;
 
 // Safe characters for repository identifiers
@@ -107,8 +110,8 @@ export function validateFilePath(filePath) {
         return { valid: false, error: 'Invalid file path' };
     }
 
-    // Sanitize - remove dangerous characters but keep normal path characters
-    const sanitized = filePath.replace(/[^\w\-\/\.\~\@\#\$\%\&\!\*\(\)\+\,\;\=\:\'\[\]\{\}\?\<\>\| ]/g, '');
+    // Sanitize - keep only safe path characters; strip all shell metacharacters
+    const sanitized = filePath.replace(/[^a-zA-Z0-9/_.\-~@+]/g, '');
 
     if (sanitized.length === 0 || sanitized.startsWith('/') || sanitized.startsWith('\\')) {
         return { valid: false, error: 'Invalid file path format' };
@@ -297,7 +300,6 @@ export class SimpleRateLimiter {
             this.cleanup();
         }, 5 * 60 * 1000);
 
-        // Prevent Node from exiting due to this interval
         if (this.cleanupInterval.unref) {
             this.cleanupInterval.unref();
         }
@@ -307,14 +309,11 @@ export class SimpleRateLimiter {
         const now = Date.now();
         const windowStart = now - this.windowMs;
 
-        // Get or create request array for this key
         if (!this.requests.has(key)) {
             this.requests.set(key, []);
         }
 
         const keyRequests = this.requests.get(key);
-
-        // Remove expired requests
         const validRequests = keyRequests.filter(t => t > windowStart);
         this.requests.set(key, validRequests);
 
@@ -324,6 +323,51 @@ export class SimpleRateLimiter {
 
         validRequests.push(now);
         return { allowed: true, remaining: this.maxRequests - validRequests.length };
+    }
+
+    /**
+     * Check rate limit with tiered limits for heavy vs light commands
+     * @param {string} key - Identifier (e.g., chat ID)
+     * @param {string} [tier='light'] - 'heavy' for /smart, /build, /pr, /fix; 'light' for everything else
+     * @returns {{ allowed: boolean, remaining: number, retryAfter?: number }}
+     */
+    isAllowedTiered(key, tier = 'light') {
+        const heavyKey = `${key}:heavy`;
+        const lightKey = `${key}:light`;
+
+        if (tier === 'heavy') {
+            // Heavy commands: stricter limit (5 per minute)
+            const heavyResult = this._check(heavyKey, 5);
+            if (!heavyResult.allowed) return heavyResult;
+            // Also count against light limit
+            const lightResult = this._check(lightKey, 15);
+            if (!lightResult.allowed) return lightResult;
+            return heavyResult;
+        }
+        return this._check(lightKey, 20);
+    }
+
+    /**
+     * Internal check with a custom max
+     */
+    _check(key, maxRequests) {
+        const now = Date.now();
+        const windowStart = now - this.windowMs;
+
+        if (!this.requests.has(key)) {
+            this.requests.set(key, []);
+        }
+
+        const keyRequests = this.requests.get(key);
+        const validRequests = keyRequests.filter(t => t > windowStart);
+        this.requests.set(key, validRequests);
+
+        if (validRequests.length >= maxRequests) {
+            return { allowed: false, remaining: 0, retryAfter: Math.ceil((validRequests[0] - windowStart) / 1000) };
+        }
+
+        validRequests.push(now);
+        return { allowed: true, remaining: maxRequests - validRequests.length };
     }
 
     cleanup() {
@@ -366,16 +410,16 @@ export function generateSecureNonce() {
 }
 
 /**
- * Performs timing-safe comparison of two strings
+ * Performs timing-safe comparison of two strings (Web Crypto API).
  */
-export function timingSafeCompare(a, b) {
+export async function timingSafeCompare(a, b) {
     if (typeof a !== 'string' || typeof b !== 'string') return false;
     if (a.length !== b.length) return false;
 
-    const bufA = Buffer.from(a);
-    const bufB = Buffer.from(b);
+    const bufA = new TextEncoder().encode(a);
+    const bufB = new TextEncoder().encode(b);
 
-    return crypto.timingSafeEqual(bufA, bufB);
+    return await crypto.subtle.timingSafeEqual(bufA, bufB);
 }
 
 // ─── Content-Type Validation ──────────────────────────────────────────────────
@@ -461,7 +505,8 @@ export function securityLogger(req, res, next) {
         const isSecurityEvent = [401, 403, 429].includes(res.statusCode);
 
         if (isSecurityEvent || req.path.includes('/auth') || req.path.includes('/webhook')) {
-            console.log('[Security]', {
+            logger.warn({
+                component: 'security',
                 method: req.method,
                 path: req.path,
                 statusCode: res.statusCode,

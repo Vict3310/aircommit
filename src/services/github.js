@@ -115,7 +115,8 @@ export async function getRepoFilePaths(octokit, owner, repo, defaultBranch) {
   const cached = fileTreeCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
     // Also cache to Redis for other instances
-    await setFileTreeCache(owner, repo, defaultBranch, cached.paths).catch(() => { });
+    const setResult = await setFileTreeCache(owner, repo, defaultBranch, cached.paths);
+    if (!setResult) console.warn('[GitHub] Failed to cache file tree to Redis');
     return cached.paths;
   }
 
@@ -137,7 +138,8 @@ export async function getRepoFilePaths(octokit, owner, repo, defaultBranch) {
 
   // Update both caches
   fileTreeCache.set(cacheKey, { paths, timestamp: Date.now() });
-  await setFileTreeCache(owner, repo, defaultBranch, paths).catch(() => { });
+  const setResult = await setFileTreeCache(owner, repo, defaultBranch, paths);
+  if (!setResult) console.warn('[GitHub] Failed to cache file tree to Redis (main path)');
 
   return paths;
 }

@@ -73,7 +73,7 @@ export async function uploadAuditLogTo0G(auditData) {
     return { txHash, rootHash };
   } finally {
     // Clean up temp file
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    try { fs.unlinkSync(tmpFile); } catch (e) { console.warn('[0G] Temp file cleanup failed:', e.message); }
   }
 }
 
@@ -120,7 +120,7 @@ export async function uploadBackupTo0G(chatId, repo, files) {
 
     return { txHash, rootHash };
   } finally {
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    try { fs.unlinkSync(tmpFile); } catch (e) { console.warn('[0G] Backup temp file cleanup failed:', e.message); }
   }
 }
 
@@ -142,9 +142,16 @@ export async function downloadChatArchiveFrom0G(rootHash) {
     try {
       const shardedNodes = await _indexer.getShardedNodes();
       nodes = shardedNodes.map(n => new StorageNode(n.address.rpc));
-    } catch (_) {
-      // Fallback to standard public storage node RPCs if indexer fails
-      nodes = [new StorageNode('https://rpc-storage-testnet.0g.ai')];
+    } catch (e) {
+      // Fallback to configured storage node RPCs if indexer fails
+      console.warn('[0G] Indexer getShardedNodes failed, using fallback nodes:', e.message);
+      const fallbackNodes = (config.zerogFallbackNodes || 'https://rpc-storage-testnet.0g.ai')
+        .split(',')
+        .map(n => n.trim())
+        .filter(Boolean);
+      nodes = fallbackNodes.length > 0
+        ? fallbackNodes.map(n => new StorageNode(n))
+        : [new StorageNode('https://rpc-storage-testnet.0g.ai')];
     }
 
     const downloader = new Downloader(nodes);
@@ -154,7 +161,12 @@ export async function downloadChatArchiveFrom0G(rootHash) {
     }
 
     const raw = fs.readFileSync(tmpFile, 'utf-8');
-    return JSON.parse(raw);
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (parseErr) {
+      throw new Error(`Invalid JSON in downloaded archive: ${parseErr.message}`);
+    }
   } catch (err) {
     console.warn(`0G download failed: ${err.message}. Trying Supabase metadata fallback...`);
     // Fallback: If 0G is down, retrieve the audit/archive payload from our local DB
@@ -167,7 +179,7 @@ export async function downloadChatArchiveFrom0G(rootHash) {
     }
     throw new Error(`Failed to retrieve archive from 0G: ${err.message}`);
   } finally {
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    try { fs.unlinkSync(tmpFile); } catch (e) { console.warn('[0G] Download temp file cleanup failed:', e.message); }
   }
 }
 
@@ -209,6 +221,6 @@ export async function uploadChatArchiveTo0G(chatId, encryptedPayload) {
 
     return { txHash, rootHash };
   } finally {
-    try { fs.unlinkSync(tmpFile); } catch (_) {}
+    try { fs.unlinkSync(tmpFile); } catch (e) { console.warn('[0G] Chat archive temp file cleanup failed:', e.message); }
   }
 }
