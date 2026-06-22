@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AirCommit Editor</title>
+  <!-- Telegram Web App SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Monaco Editor Loader -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: var(--tg-theme-bg-color, #1e1e1e);
+      color: var(--tg-theme-text-color, #ffffff);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden;
+    }
+    #editor-container {
+      width: 100vw;
+      height: 100vh;
+    }
+    #loader {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 16px;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <div id="loader">Loading Editor...</div>
+  <div id="editor-container" style="display: none;"></div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+    tg.ready();
+
+    // Set theme color
+    const isDark = tg.colorScheme === 'dark';
+    
+    // Parse URL params
+    const urlParams = new URLSearchParams(window.location.search);
+    const filePath = urlParams.get('file');
+    const chatId = urlParams.get('chatId');
+
+    if (!filePath || !chatId) {
+      document.getElementById('loader').innerText = 'Missing file or chat ID';
+    } else {
+      // Fetch file content
+      fetch(`/api/file?file=${encodeURIComponent(filePath)}&chatId=${chatId}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            document.getElementById('loader').innerText = `Error: ${data.error}`;
+            return;
+          }
+          initMonaco(data.content);
+        })
+        .catch(err => {
+          document.getElementById('loader').innerText = `Failed to load: ${err.message}`;
+        });
+    }
+
+    function initMonaco(content) {
+      document.getElementById('loader').style.display = 'none';
+      document.getElementById('editor-container').style.display = 'block';
+
+      // Configure RequireJS to load Monaco from CDN
+      require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' }});
+      
+      require(['vs/editor/editor.main'], function() {
+        const ext = filePath.split('.').pop();
+        let language = 'javascript';
+        if (ext === 'json') language = 'json';
+        if (ext === 'html') language = 'html';
+        if (ext === 'css') language = 'css';
+        if (ext === 'ts') language = 'typescript';
+        if (ext === 'py') language = 'python';
+
+        const editor = monaco.editor.create(document.getElementById('editor-container'), {
+          value: content,
+          language: language,
+          theme: isDark ? 'vs-dark' : 'vs',
+          automaticLayout: true,
+          minimap: { enabled: false },
+          fontSize: 14,
+          wordWrap: 'on'
+        });
+
+        // Set up the Main Button to save/patch
+        tg.MainButton.text = "Create Patch";
+        tg.MainButton.show();
+        
+        function saveContent() {
+          const newContent = editor.getValue();
+          tg.sendData(JSON.stringify({
+            action: 'save_file',
+            filePath,
+            newContent
+          }));
+          tg.close();
+        }
+
+        tg.MainButton.onClick(saveContent);
+
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, saveContent);
+      });
+    }
+  </script>
+</body>
+</html>

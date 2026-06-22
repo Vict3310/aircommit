@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npm test *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(rm *)",
+      "Bash(grep *)",
+      "Bash(console.log)",
+      "Bash(cp *)",
+      "Bash(sed *)",
+      "Bash(nodemon *)",
+      "Bash(timeout *)",
+      "Bash(pkill *)",
+      "Bash(sleep *)",
+      "Bash(lsof *)",
+      "Bash(netstat *)",
+      "Bash(ss *)",
+      "Bash(kill *)",
+      "Bash(true)",
+      "Bash(mkdir *)",
+      "Bash(xargs *)",
+      "Bash(fuser *)",
+      "Bash(cat *)"
+    ]
+  },
+  "$version": 4
+}

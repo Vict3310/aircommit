@@ -1,0 +1,65 @@
+# Environment & Secrets
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+
+# Backend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Chat History (contains conversations)
+chat_history.json
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing coverage
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Secrets (additional)
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 0G and crypto
+private_keys/
+*.wallet
+
+# Process files
+.process
+
+# Quota files
+.quota
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Docker
+.dockerenv
