@@ -118,7 +118,7 @@ export function registerAuthCommands(bot, sendStatus) {
       `• Run code in a sandbox\n` +
       `• Multi-repo support\n\n` +
       `🆓 *Free Tier* — 10 commands/day\n` +
-      `🚀 *Pro* — N2,000/week for unlimited\n\n` +
+      `🚀 *Pro* — 200 Stars/week (instant) or N2,000 (bank)\n\n` +
       `👉 To begin, connect your GitHub:\n\`/login\`\n\n` +
       `💎 Upgrade anytime: \`/upgrade\``,
       { parse_mode: 'Markdown' }
