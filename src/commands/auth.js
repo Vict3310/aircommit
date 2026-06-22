@@ -118,36 +118,92 @@ export function registerAuthCommands(bot) {
       `• Multi-repo support\n\n` +
       `🆓 *Free Tier* — 10 commands/day\n` +
       `🚀 *Pro* — N2,000/week for unlimited\n\n` +
-      `👉 To begin, connect your GitHub:\n\`/login\` or \`/login <PAT>\`\n\n` +
+      `👉 To begin, connect your GitHub:\n\`/login\`\n\n` +
       `💎 Upgrade anytime: \`/upgrade\``,
       { parse_mode: 'Markdown' }
     );
   });
 
-  bot.onText(/^\/login(?:\s+(.+))?$/, async (msg, match) => {
+  bot.onText(/^\/login$/, async (msg) => {
     const chatId = msg.chat.id;
-    const pat = match[1];
-
-    if (pat) {
-      try {
-        const octokit = new Octokit({ auth: pat });
-        const { data } = await octokit.request('GET /user');
-        await saveUserSession(chatId, { github_token: pat, active_owner: data.login, active_repo: null });
-        bot.sendMessage(chatId, `✅ Successfully logged in as *${data.login}* using PAT!\n\nUse \`/repos\` to list your repositories, then \`/use <owner>/<repo>\` to select one.`, { parse_mode: 'Markdown' });
-      } catch (e) {
-        bot.sendMessage(chatId, `❌ Invalid PAT. Please try again.`);
-      }
-      return;
-    }
 
     if (!config.githubClientId || !config.githubClientSecret) {
-      bot.sendMessage(chatId, `⚠️ GitHub OAuth is not configured on this deployment. Use \`/login <YOUR_PAT>\` instead.`);
+      bot.sendMessage(chatId, `⚠️ GitHub OAuth is not configured on this deployment. Please contact the admin to set up GitHub OAuth.`);
       return;
     }
 
     const authState = signOAuthState(chatId);
     const authUrl = `${config.baseUrl}/auth/github?state=${encodeURIComponent(authState)}`;
-    bot.sendMessage(chatId, `🔐 *Connect GitHub Account*\n\nClick the link below to authorize AirCommit:\n[Authorize GitHub](${authUrl})\n\nOr reply with \`/login <YOUR_PAT>\` to use a token.`, { parse_mode: 'Markdown' });
+    bot.sendMessage(chatId,
+      `🔐 *Connect GitHub Account*\n\n` +
+      `Click the link below to securely authorize AirCommit with *minimal scopes*:\n` +
+      `[Authorize GitHub](${authUrl})\n\n` +
+      `⚠️ *Note:* Personal Access Tokens (PAT) are no longer supported for security reasons.\n` +
+      `Only OAuth is accepted. This restricts the AI to \`repo\` scope only.`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  bot.onText(/^\/readonly(?:\s+(.+))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const session = await getUserSession(chatId);
+
+    if (!session || !session.github_token) {
+      return bot.sendMessage(chatId, '🔴 You are not logged in. Use `/login` first.');
+    }
+
+    const arg = match[1]?.trim().toLowerCase();
+    if (arg === 'on' || arg === 'true' || arg === '1' || (arg === undefined && !session.read_only)) {
+      await saveUserSession(chatId, { read_only: true });
+      bot.sendMessage(chatId,
+        `🔒 *Read-Only Mode: ON*\n\n` +
+        `The AI can *read* your files but cannot write, edit, or delete anything.\n` +
+        `Use \`/readonly off\` to re-enable write access.`,
+        { parse_mode: 'Markdown' }
+      );
+    } else if (arg === 'off' || arg === 'false' || arg === '0' || (arg === undefined && session.read_only)) {
+      await saveUserSession(chatId, { read_only: false });
+      bot.sendMessage(chatId,
+        `🔓 *Read-Only Mode: OFF*\n\n` +
+        `The AI can now read *and write* to your repository.\n` +
+        `Use \`/readonly on\` to re-enable read-only mode.`,
+        { parse_mode: 'Markdown' }
+      );
+    } else {
+      bot.sendMessage(chatId,
+        `🔒 *Read-Only Mode*\n\n` +
+        `Current status: ${session.read_only ? '🟢 ON' : '🔴 OFF'}\n\n` +
+        `Usage:\n` +
+        `\`/readonly on\` — Block all AI write operations\n` +
+        `\`/readonly off\` — Allow AI to write files\n` +
+        `\`/readonly\` — Toggle current mode`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  });
+
+  bot.onText(/^\/history$/, async (msg) => {
+    const chatId = msg.chat.id;
+    const session = await getUserSession(chatId);
+    if (!session || !session.github_token) {
+      return bot.sendMessage(chatId, '🔴 You are not logged in. Use `/login` first.');
+    }
+
+    const history = session.action_history || [];
+    if (history.length === 0) {
+      return bot.sendMessage(chatId, `📜 *Action History*\n\nNo recent actions recorded. Use \`/fix\` or \`/smart\` to interact with the AI.`, { parse_mode: 'Markdown' });
+    }
+
+    const lines = history.slice(-10).map((entry, i) => {
+      const date = new Date(entry.timestamp).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      return `${i + 1}. *${entry.action}* — \`${entry.file || 'N/A'}\` (${date})`;
+    });
+
+    bot.sendMessage(chatId,
+      `📜 *Last 10 AI Actions*\n\n${lines.join('\n')}\n\n` +
+      `Use \`/audit\` for the full 0G-backed audit trail.`,
+      { parse_mode: 'Markdown' }
+    );
   });
 
   bot.onText(/^\/logout$/, async (msg) => {

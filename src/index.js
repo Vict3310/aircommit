@@ -254,10 +254,52 @@ app.get('/auth/github/callback', async (req, res) => {
 
     const accessToken = tokenData.access_token;
 
-    const userRes = await fetch('https://api.github.com/user', {
+    // ─── Validate token scopes ─────────────────────────────────────
+    const scopeCheckRes = await fetch('https://api.github.com/user', {
       headers: { 'Authorization': `token ${accessToken}`, 'User-Agent': 'AirCommit' }
     });
-    const userData = await userRes.json();
+    const scopes = scopeCheckRes.headers.get('x-oauth-scopes') || '';
+    const userData = await scopeCheckRes.json();
+
+    const scopeList = scopes.split(',').map(s => s.trim().toLowerCase());
+
+    // Block dangerous scopes
+    const dangerousScopes = ['admin:org', 'delete_repo', 'admin:repo_hook', 'admin:org_hook', 'site_admin'];
+    const foundDangerous = scopeList.filter(s => dangerousScopes.includes(s));
+    if (foundDangerous.length > 0) {
+      logger.warn({
+        component: 'oauth',
+        chatId,
+        user: userData.login,
+        dangerousScopes: foundDangerous
+      }, `⚠️ Token has dangerous scopes: ${foundDangerous.join(', ')}`);
+      bot.sendMessage(chatId,
+        `⚠️ *Security Warning*\n\n` +
+        `Your GitHub token has broad permissions:\n\`${foundDangerous.join(', ')}\`\n\n` +
+        `AirCommit only needs \`repo\` scope. Consider revoking this token at:\n` +
+        `https://github.com/settings/applications\n\n` +
+        `Proceeding with limited functionality.`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    // Check for minimum required scope
+    const hasRepoScope = scopeList.includes('repo') || scopeList.some(s => s.startsWith('repo:'));
+    if (!hasRepoScope) {
+      logger.warn({
+        component: 'oauth',
+        chatId,
+        user: userData.login,
+        scopes: scopeList
+      }, 'Token missing repo scope');
+      res.send('<h1>Insufficient permissions</h1><p>The token does not include <code>repo</code> scope. Please re-authorize.</p>');
+      return bot.sendMessage(chatId,
+        `❌ *Insufficient Permissions*\n\n` +
+        `The authorized token is missing the \`repo\` scope.\n\n` +
+        `Please run \`/login\` again and approve the full \`repo\` scope.`,
+        { parse_mode: 'Markdown' }
+      );
+    }
 
     await saveUserSession(chatId, {
       github_token: accessToken,

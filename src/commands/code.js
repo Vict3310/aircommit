@@ -1,11 +1,12 @@
 import { requireSession, fetchFile, getDefaultBranch, getRepoFilePaths, applyAndCommit, applyAndCommitToBranch } from '../services/github.js';
-import { callAI, callAIRaw } from '../services/ai.js';
-import { MULTI_PATCH_PROMPT, FILES_PICKER_PROMPT, PR_DESCRIPTION_PROMPT } from '../core/prompts.js';
+import { callAI, callAIRaw, callChatWithTools } from '../services/ai.js';
+import { MULTI_PATCH_PROMPT, FILES_PICKER_PROMPT, PR_DESCRIPTION_PROMPT, CHAT_SYSTEM_PROMPT } from '../core/prompts.js';
+import { chatHistories, saveHistories } from './chat.js';
 import { pendingActions, generateActionId } from '../core/pending.js';
 import { uploadAuditLogTo0G } from '../services/zerog.js';
 import { triggerBackgroundSync } from '../services/sync.js';
 import config from '../core/config.js';
-import { getUserSession } from '../services/supabase.js';
+import { getUserSession, saveUserSession } from '../services/supabase.js';
 import { hasFeature, commandLimitMessage, premiumFeatureMessage } from '../services/subscription.js';
 import fs from 'fs';
 import path from 'path';
@@ -156,6 +157,18 @@ export function registerCodeCommands(bot, sendStatus) {
       return bot.sendMessage(chatId, gate.message);
     }
 
+    // Seed chat history with context so follow-ups remember the task
+    const historyKey = String(chatId);
+    if (!chatHistories.has(historyKey)) {
+      const userSession = await getUserSession(chatId);
+      const contextNote = userSession?.active_file
+        ? `\n\n[Active file: \`${userSession.active_file}\`]`
+        : '';
+      chatHistories.set(historyKey, [
+        { role: 'system', content: CHAT_SYSTEM_PROMPT + contextNote }
+      ]);
+    }
+
     const status = await sendStatus(chatId, '🧠 Scanning repository...');
 
     try {
@@ -208,6 +221,15 @@ export function registerCodeCommands(bot, sendStatus) {
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: keyboard }
       });
+
+      // Store context in chat history so follow-ups work
+      const history = chatHistories.get(historyKey);
+      history.push({ role: 'user', content: `[Task Context] User requested /smart with intent: ${intent}. Targets: ${picker.filePaths.join(', ')}. Reason: ${picker.reasoning}. AI proposed commit: ${result.commitMessage}. The patches are pending user approval.` });
+      history.push({ role: 'assistant', content: `✅ Done! I've prepared patches for:\n\n${picker.filePaths.map(p => `📄 \`${p}\``).join('\n')}\n\n📝 ${result.commitMessage}\n\nUse the buttons above to approve/reject, or reply with a follow-up.` });
+      saveHistories();
+
+      // Track current task
+      await saveUserSession(chatId, { current_task: `📋 Smart: ${intent.substring(0, 80)}` });
     } catch (error) {
       await status.update(`❌ ${error.message}`);
     }
