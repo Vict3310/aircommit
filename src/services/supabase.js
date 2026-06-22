@@ -84,7 +84,15 @@ export async function getUserSession(chatId) {
     }
   } else {
     const memData = memorySessions.get(normalizedChatId);
-    sessionData = memData ? JSON.parse(JSON.stringify(memData)) : null;
+    if (memData) {
+      sessionData = JSON.parse(JSON.stringify(memData));
+      // Decrypt tokens in memory mode just like Supabase mode
+      if (sessionData.github_token) {
+        sessionData.github_token = decrypt(sessionData.github_token);
+      }
+    } else {
+      sessionData = null;
+    }
   }
 
   // Decrypt the 0G master key if present (single encrypted string, not a JSON map)

@@ -3,9 +3,32 @@ import { getUserSession } from './supabase.js';
 import { createError, ValidationError, RepositoryError, AuthenticationError } from '../core/errors.js';
 import { getCache, setCache, getFileTreeCache, setFileTreeCache, invalidateFileTreeCache } from './cache.js';
 
+// ─── Read-Only Mode ──────────────────────────────────────────────────────────
+
+/**
+ * Checks if a user is in read-only mode and throws if attempting a write operation
+ */
+function checkReadOnly(session, operation) {
+  if (session.read_only) {
+    throw new AuthenticationError(
+      `🔒 Read-only mode enabled. \`${operation}\` is not allowed.\n` +
+      `Use \`/readonly off\` to disable read-only mode.`
+    );
+  }
+}
+
+/**
+ * Creates a read-only scoped Octokit (only list/get operations)
+ * and a full Octokit for write operations
+ */
+function createScopedOctokits(token) {
+  const octokit = new Octokit({ auth: token });
+  return { octokit };
+}
+
 // ─── Parallel File Operations ────────────────────────────────────────────────
 
-export async function requireSession(chatId) {
+export async function requireSession(chatId, requireWrite = false) {
   const session = await getUserSession(chatId);
   if (!session || !session.github_token) {
     throw new AuthenticationError('You are not logged in. Use `/login` to connect your GitHub account.');
@@ -13,13 +36,31 @@ export async function requireSession(chatId) {
   if (!session.active_repo) {
     throw new RepositoryError('No active repository set. Use `/repos` to list your repos and `/use <owner>/<repo>` to set one.');
   }
+
+  if (requireWrite) {
+    checkReadOnly(session, 'write operation');
+  }
+
+  const { octokit } = createScopedOctokits(session.github_token);
   return {
-    octokit: new Octokit({ auth: session.github_token }),
+    octokit,
     owner: session.active_owner,
     repo: session.active_repo,
     active_file: session.active_file || null,
-    github_token: session.github_token
+    github_token: session.github_token,
+    read_only: session.read_only || false
   };
+}
+
+/**
+ * Creates a write-scoped Octokit that labels AI commits distinctly
+ */
+export function createWriteOctokit(token, labelAsAirCommit = true) {
+  const octokit = new Octokit({
+    auth: token,
+    userAgent: labelAsAirCommit ? 'aircommit-bot' : undefined
+  });
+  return octokit;
 }
 
 export async function fetchFile(octokit, owner, repo, filePath) {

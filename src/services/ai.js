@@ -1,7 +1,7 @@
 import config from '../core/config.js';
 import { CHAT_TOOLS, selectRelevantTools, getOptimalModel } from '../core/prompts.js';
-import { requireSession, fetchFile, getDefaultBranch, getRepoFilePaths, applyAndCommit, commitChangesWithTree } from './github.js';
-import { getUserSession, decrypt } from './supabase.js';
+import { requireSession, createWriteOctokit, fetchFile, getDefaultBranch, getRepoFilePaths, applyAndCommit, commitChangesWithTree, invalidateFileTree } from './github.js';
+import { getUserSession, saveUserSession, decrypt } from './supabase.js';
 import { uploadAuditLogTo0G } from './zerog.js';
 import { sendStatusUpdate } from './websocket.js';
 import { resolveAIKey } from './keys.js';
@@ -193,8 +193,10 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
     ];
 
   let session;
+  let readOnlyMode = false;
   try {
     session = await requireSession(chatId);
+    readOnlyMode = session.read_only || false;
   } catch (e) {
     // Allow chat without session — tools will fail gracefully.
   }
@@ -263,6 +265,10 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
             ? content.substring(0, 10000) + '\n\n...[file truncated at 10,000 chars]'
             : content;
         } else if (fnName === 'create_or_overwrite_file') {
+          if (readOnlyMode) {
+            result = `🔒 Read-only mode is ON. The \`create_or_overwrite_file\` tool is disabled. Tell the user to run \`/readonly off\` to enable writes.`;
+            continue;
+          }
           await onStatus(`✍️ Staging \`${args.file_path}\` for write...`);
           treeChanges.push({
             path: args.file_path,
@@ -272,6 +278,10 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           });
           result = `Successfully staged ${args.file_path} for creation/overwrite.`;
         } else if (fnName === 'patch_file') {
+          if (readOnlyMode) {
+            result = `🔒 Read-only mode is ON. The \`patch_file\` tool is disabled. Tell the user to run \`/readonly off\` to enable writes.`;
+            continue;
+          }
           await onStatus(`⚙️ Staging \`${args.file_path}\` for patch...`);
           const { content: originalContent } = await fetchFile(octokit, owner, repo, args.file_path);
 
@@ -297,6 +307,10 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           });
           result = `Successfully staged ${args.file_path} for patching.`;
         } else if (fnName === 'delete_file') {
+          if (readOnlyMode) {
+            result = `🔒 Read-only mode is ON. The \`delete_file\` tool is disabled. Tell the user to run \`/readonly off\` to enable writes.`;
+            continue;
+          }
           await onStatus(`🗑️ Staging \`${args.file_path}\` for deletion...`);
           treeChanges.push({
             path: args.file_path,
@@ -305,6 +319,10 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           });
           result = `Successfully staged ${args.file_path} for deletion.`;
         } else if (fnName === 'manage_dependencies') {
+          if (readOnlyMode) {
+            result = `🔒 Read-only mode is ON. The \`manage_dependencies\` tool is disabled. Tell the user to run \`/readonly off\` to enable writes.`;
+            continue;
+          }
           await onStatus(`📦 Staging dependencies: ${args.action} ${args.packages.join(', ')}...`);
           const { content: pkgJsonContent } = await fetchFile(octokit, owner, repo, 'package.json');
           const pkg = JSON.parse(pkgJsonContent);
@@ -336,7 +354,22 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           });
           result = `Successfully staged package.json updates. User must run npm install locally.`;
         } else {
-          result = `Unknown tool: ${fnName}`;
+          // Fuzzy match: try to find closest known tool name
+          const knownTools = ['list_repo_files', 'read_file', 'create_or_overwrite_file', 'patch_file', 'delete_file', 'manage_dependencies'];
+          const normalized = fnName.replace(/[_-]/g, '').toLowerCase();
+          let matched = false;
+          for (const known of knownTools) {
+            const knownNormalized = known.replace(/[_-]/g, '').toLowerCase();
+            if (normalized === knownNormalized || normalized.includes(knownNormalized) || knownNormalized.includes(normalized)) {
+              // Hint the model to retry with the correct tool name
+              result = `System: You called "${fnName}" but the correct tool name is "${known}". Please retry using "${known}" with the same arguments.`;
+              matched = true;
+              break;
+            }
+          }
+          if (!matched) {
+            result = `Unknown tool: ${fnName}. Available tools: ${knownTools.join(', ')}`;
+          }
         }
       } catch (e) {
         result = `Error calling ${fnName}: ${e.message}`;
@@ -348,11 +381,23 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
     if (treeChanges.length > 0) {
       await onStatus(`🌐 Committing ${treeChanges.length} changes atomically...`);
       try {
-        const { octokit, owner, repo } = session;
-        const defaultBranch = await getDefaultBranch(octokit, owner, repo);
+        const { owner, repo, github_token } = session;
+        const writeOctokit = createWriteOctokit(github_token);
+        const defaultBranch = await getDefaultBranch(writeOctokit, owner, repo);
         const msg = treeChanges[0].commitMessage || 'Agentic modifications';
 
-        await commitChangesWithTree(octokit, owner, repo, defaultBranch, msg, treeChanges);
+        await commitChangesWithTree(writeOctokit, owner, repo, defaultBranch, msg, treeChanges);
+        await invalidateFileTree(owner, repo);
+
+        // Track action in session history for /history command
+        const actionHistory = session.action_history || [];
+        actionHistory.push({
+          action: msg,
+          file: treeChanges.map(c => c.path).join(', '),
+          timestamp: new Date().toISOString()
+        });
+        const trimmed = actionHistory.slice(-50); // keep last 50
+        await saveUserSession(chatId, { action_history: trimmed });
 
         await onStatus(`🌐 Audit: Uploading to 0G...`);
         const auditData = {
