@@ -88,20 +88,30 @@ export function registerChatCommands(bot, sendStatus, safeSend) {
       `🤖 *AirCommit — IDE Agent Edition*
 
 *Account:*
-\`/login\` → Connect GitHub via OAuth or PAT
+\`/login\` → Connect GitHub via OAuth
 \`/repos\` → List & select your repositories
 \`/status\` → Check full connection & AI status
 \`/logout\` → Disconnect account
+\`/readonly on\` → Enable read-only mode
+\`/history\` → View recent AI actions
 
 *AI Model Management:*
 \`/models\` → List all free & premium AI models.
 \`/model [id]\` → Switch your active AI model.
 \`/key [openrouter_key]\` → Link your own API key (BYOK).
 \`/key clear\` → Remove your key.
+\`/openai [key]\` → Add OpenAI key for voice notes.
 
 *Active File (IDE Context):*
 \`/open [filepath]\` → Set the active file for all commands.
 \`/close\` → Clear the active file context.
+
+*Payment & Subscription:*
+\`/upgrade\` → Upgrade with Telegram Stars or bank transfer
+\`/pay\` → Pay with bank transfer or crypto
+\`/status\` → Check subscription plan
+\`/billing\` → View billing details
+\`/cancel\` → Cancel your subscription
 
 *Coding Commands:*
 \`/fix [instruction]\` → Patch active file (or specify file path).
