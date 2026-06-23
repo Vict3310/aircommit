@@ -35,6 +35,12 @@ import {
   SimpleRateLimiter
 } from './core/security.js';
 
+// Sentry error monitoring (opt-in, initialized only if SENTRY_DSN is set)
+import { initSentry } from './core/sentry.js';
+
+// Initialize Sentry early (before any other module)
+initSentry();
+
 // Import fetchWithTimeout for timeout-safe external HTTP requests
 import { fetchWithTimeout } from './core/fetch-timeout.js';
 
@@ -748,6 +754,32 @@ async function safeSend(chatId, text, extra = {}) {
     throw err;
   }
 }
+
+// ─── Express Error Handling Middleware ───────────────────────────────────────
+// Catch 404 and forward to central error handler
+
+app.use((req, res, next) => {
+  const err = new Error(`Not Found — ${req.method} ${req.path}`);
+  err.statusCode = 404;
+  next(err);
+});
+
+app.use((err, req, res, next) => {
+  const statusCode = err.statusCode || 500;
+  const environment = process.env.NODE_ENV || 'development';
+  const log = logger.withRequest(req);
+
+  log.error(
+    { component: 'express-error', statusCode, path: req.path, method: req.method },
+    err.message
+  );
+
+  res.status(statusCode).json({
+    error: statusCode === 404 ? 'Not Found' : 'Internal Server Error',
+    message: err.message,
+    ...(environment === 'development' ? { stack: err.stack } : {})
+  });
+});
 
 // ─── Register Commands ────────────────────────────────────────────────────────
 registerAuthCommands(bot, sendStatus);

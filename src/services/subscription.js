@@ -162,40 +162,6 @@ export function deactivateSubscription() {
     };
 }
 
-// ─── Payment Methods Config ──────────────────────────────────────────────────
-
-export const PAYMENT_METHODS = {
-    stars: {
-        id: 'stars',
-        name: 'Telegram Stars',
-        description: '⚡ Instant activation',
-        enabled: true,
-    },
-    bank: {
-        id: 'bank',
-        name: 'Bank Transfer (Opay/Palmpay)',
-        description: '🏦 Manual activation (~5 min)',
-        enabled: true,
-        details: {
-            bank: 'Opay',
-            account_number: process.env.PAYMENT_BANK_ACCOUNT || '__SET_REAL_ACCOUNT_IN_ENV__',
-            account_name: 'AirCommit',
-        },
-    },
-    crypto: {
-        id: 'crypto',
-        name: 'Crypto (USDT/BNB)',
-        description: '💰 Manual activation (~10 min)',
-        enabled: true,
-        details: {
-            // WARNING: Zero-address placeholders will cause users to LOSE funds.
-            // These MUST be set via PAYMENT_USDT_BSC and PAYMENT_BNB_BSC env vars.
-            usdt_bsc: process.env.PAYMENT_USDT_BSC || '0x0000000000000000000000000000000000000000',
-            bnb_bsc: process.env.PAYMENT_BNB_BSC || '0x0000000000000000000000000000000000000000',
-        },
-    },
-};
-
 // ─── Upgrade Message Builder ─────────────────────────────────────────────────
 
 export function buildUpgradeMessage(chatId) {
@@ -220,10 +186,8 @@ export function buildUpgradeMessage(chatId) {
     message += `   • All features + multi-repo\n`;
     message += `   • Team AI memory\n\n`;
 
-    message += `*Pay with:*\n`;
-    message += '⭐ Click `/upgrade` for instant payment with Telegram Stars\n';
-    message += '🏦 Send `/pay` for bank transfer or crypto\n\n';
-    message += `After payment, reply with your proof and we'll activate within 5 minutes!`;
+    message += `*Pay with Telegram Stars:*\n`;
+    message += `⭐ Click \`/upgrade\` for instant activation\n\n`;
 
     return message;
 }
@@ -231,7 +195,7 @@ export function buildUpgradeMessage(chatId) {
 // ─── Premium Feature Messages ────────────────────────────────────────────────
 
 export function premiumFeatureMessage() {
-    return '🔒 *Premium Feature*\n\nThis requires a Starter plan or higher.\n\nUse `/upgrade` to unlock with Telegram Stars.\nOr `/pay` for bank transfer / crypto.';
+    return '🔒 *Premium Feature*\n\nThis requires a Starter plan or higher.\n\nUse `/upgrade` to unlock with Telegram Stars.';
 }
 
 export function commandLimitMessage(remaining) {

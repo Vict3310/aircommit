@@ -107,8 +107,7 @@ export function registerChatCommands(bot, sendStatus, safeSend) {
 \`/close\` → Clear the active file context.
 
 *Payment & Subscription:*
-\`/upgrade\` → Upgrade with Telegram Stars or bank transfer
-\`/pay\` → Pay with bank transfer or crypto
+\`/upgrade\` → Upgrade with Telegram Stars
 \`/status\` → Check subscription plan
 \`/billing\` → View billing details
 \`/cancel\` → Cancel your subscription
