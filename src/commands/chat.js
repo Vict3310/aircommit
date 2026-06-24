@@ -8,6 +8,7 @@ import { commitChangesWithTree, getDefaultBranch, createWriteOctokit, invalidate
 import config from '../core/config.js';
 import { encrypt } from '../services/supabase.js';
 import { fetchWithTimeout } from '../core/fetch-timeout.js';
+import { setPendingAction, generateActionId } from '../core/pending.js';
 
 const HISTORY_FILE = path.resolve('./chat_history.json');
 const MAX_HISTORY = 20;
@@ -321,6 +322,10 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
       }
 
       if (pendingChanges) {
+        // Store as pending action so callback_query buttons also work
+        const actionId = generateActionId();
+        setPendingAction(actionId, { type: 'pendingChanges', ...pendingChanges });
+
         // Send the pending changes prompt
         if (reply.length > 4000) {
           for (let i = 0; i < reply.length; i += 4000) {

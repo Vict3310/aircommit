@@ -1,4 +1,4 @@
-import { requireSession, fetchFile, getDefaultBranch, getRepoFilePaths, applyAndCommit, applyAndCommitToBranch } from '../services/github.js';
+import { requireSession, fetchFile, getDefaultBranch, getRepoFilePaths, applyAndCommit, applyAndCommitToBranch, commitChangesWithTree, createWriteOctokit, invalidateFileTree } from '../services/github.js';
 import { callAI, callAIRaw, callChatWithTools } from '../services/ai.js';
 import { MULTI_PATCH_PROMPT, FILES_PICKER_PROMPT, PR_DESCRIPTION_PROMPT, CHAT_SYSTEM_PROMPT } from '../core/prompts.js';
 import { chatHistories, saveHistories } from './chat.js';
@@ -603,6 +603,33 @@ Return ONLY a valid JSON object matching this schema:
             content: action.content,
           });
           successMsg = `✅ *Test File Created Live!*\n\n📄 File: \`${action.filePath}\`\n📝 Commit: _${action.commitMessage}_`;
+        } else if (action.type === 'pendingChanges') {
+          // Handle treeChanges-style pending changes (from /chat AI agent)
+          const { changes, commitMessage, owner, repoName } = action;
+          const session = await requireSession(chatId);
+          const octokit = createWriteOctokit(session.github_token);
+          const defaultBranch = await getDefaultBranch(octokit, owner, repoName);
+          const commitSha = await commitChangesWithTree(octokit, owner, repoName, defaultBranch, commitMessage, changes);
+          await invalidateFileTree(owner, repoName);
+
+          successMsg = `✅ *Changes Committed*`;
+
+          const auditLog = {
+            timestamp: new Date().toISOString(),
+            type: 'agent_edit',
+            repo: `${owner}/${repoName}`,
+            commitMessage,
+            commitSha,
+            steps: changes.map(c => ({ file: c.path, action: c.action, status: '✅' })),
+            approvedByChatId: chatId,
+          };
+          try {
+            await uploadAuditLogTo0G(auditLog);
+          } catch (_) { }
+
+          try {
+            await triggerBackgroundSync(chatId, owner, repoName, session.github_token);
+          } catch (_) { }
         }
 
         deletePendingAction(actionId);
