@@ -346,15 +346,24 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           await onStatus(`⚙️ Staging \`${args.file_path}\` for patch...`);
           const { content: originalContent } = await fetchFile(octokit, owner, repo, args.file_path);
 
-          let newContent = originalContent;
-          if (originalContent.includes(args.find)) {
-            newContent = originalContent.replace(args.find, args.replace);
+          // Normalize line-endings for consistent comparison
+          const normalize = str => str.replace(/\r\n/g, '\n').trim();
+          const normOriginal = normalize(originalContent);
+          const normFind = normalize(args.find);
+          const normReplace = normalize(args.replace);
+
+          // Guard: reject no-op patches where find == replace
+          if (normFind === normReplace) {
+            result = `System: The "find" and "replace" text are identical for \`${args.file_path}\` — no actual change would be made. Aborting.`;
+            throw new Error('No-op patch detected — find and replace are identical.');
+          }
+
+          if (normOriginal.includes(normFind)) {
+            newContent = normalize(normOriginal.replace(normFind, normReplace));
           } else {
-            const normalize = str => str.replace(/\r\n/g, '\n');
-            const normalizedCurrent = normalize(originalContent);
-            const normalizedFind = normalize(args.find);
-            if (normalizedCurrent.includes(normalizedFind)) {
-              newContent = normalizedCurrent.replace(normalizedFind, normalize(args.replace));
+            // Fallback: exact match without normalization
+            if (originalContent.includes(args.find)) {
+              newContent = originalContent.replace(args.find, args.replace);
             } else {
               throw new Error(`The "find" text block was not found in the original file.`);
             }
