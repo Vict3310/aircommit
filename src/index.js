@@ -60,6 +60,7 @@ import { registerMultiRepoCommands } from './services/multirepo.js';
 import { registerPRReviewCommands } from './services/pr-review.js';
 import { registerAdvancedCommands } from './services/advanced-features.js';
 import { registerPaymentCommands } from './commands/payment.js';
+import { verifyWebhookSignature, createCheckoutSession, verifyTransaction } from './services/paystack.js';
 
 // ─── Web Server & OAuth ───────────────────────────────────────────────────────
 const app = express();
@@ -473,6 +474,76 @@ app.post('/webhook/github', async (req, res) => {
     }
   } catch (error) {
     logger.error({ component: 'webhook', error: error.message }, 'Webhook error');
+  }
+
+  res.sendStatus(200);
+});
+
+// ─── Paystack Webhook ─────────────────────────────────────────────────────────
+// Handles payment confirmations from Paystack
+app.post('/webhook/paystack', async (req, res) => {
+  const signature = req.headers['x-paystack-signature'];
+  const rawBody = req.rawBody || JSON.stringify(req.body);
+
+  // Verify webhook signature
+  if (!verifyWebhookSignature(rawBody, signature)) {
+    logger.warn({ component: 'paystack-webhook' }, 'Invalid Paystack webhook signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  const event = req.body;
+
+  try {
+    // Only handle 'charge.success' events
+    if (event.event !== 'charge.success') {
+      return res.sendStatus(200);
+    }
+
+    const data = event.data;
+    const reference = data.reference;
+
+    // Verify the transaction on Paystack's side
+    const isSuccessful = await verifyTransaction(reference);
+    if (!isSuccessful) {
+      logger.warn({ component: 'paystack-webhook', reference }, 'Transaction not verified as successful');
+      return res.sendStatus(200);
+    }
+
+    // Parse reference: aircommit_{tier}_{chatId}_{timestamp}
+    const parts = reference.split('_');
+    if (parts.length < 4 || parts[0] !== 'aircommit') {
+      logger.warn({ component: 'paystack-webhook', reference }, 'Invalid Paystack reference format');
+      return res.sendStatus(200);
+    }
+
+    const tier = parts[1];
+    const chatId = parseInt(parts[2], 10);
+
+    // Activate subscription
+    const { activateSubscription } = await import('./services/subscription.js');
+    const subscriptionData = await activateSubscription(chatId, tier, 30, 'paystack');
+    const { saveUserSession } = await import('./services/supabase.js');
+    await saveUserSession(chatId, subscriptionData);
+
+    // Send confirmation to user via Telegram
+    try {
+      const tierConfig = (await import('./services/subscription.js')).SUBSCRIPTION_TIERS[tier];
+      bot.sendMessage(chatId,
+        `🎉 *${tierConfig.name} Activated!*\n\n` +
+        `Your AirCommit ${tierConfig.name} plan is now active for 30 days.\n\n` +
+        `✨ *Features unlocked:*\n` +
+        `• Commands: ${tierConfig.commandsPerDay < 0 ? 'Unlimited' : tierConfig.commandsPerDay + '/month'}\n` +
+        `• Repos: ${tierConfig.maxRepos < 0 ? 'Unlimited' : tierConfig.maxRepos}\n\n` +
+        `Use \`/status\` to see your plan details.`
+      );
+    } catch (notifyError) {
+      logger.error({ component: 'paystack-webhook', error: notifyError.message }, 'Failed to notify user of activation');
+    }
+
+    logger.info({ component: 'paystack-webhook', chatId, tier }, 'Paystack payment confirmed, subscription activated');
+
+  } catch (error) {
+    logger.error({ component: 'paystack-webhook', error: error.message }, 'Paystack webhook processing failed');
   }
 
   res.sendStatus(200);

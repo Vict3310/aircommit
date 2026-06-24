@@ -15,8 +15,7 @@ export const SUBSCRIPTION_TIERS = {
     starter: {
         id: 'starter',
         name: 'Starter',
-        priceStars: 50,
-        priceNGN: 500,
+        priceNGN: 5000,
         commandsPerDay: 50,
         maxRepos: 1,
         historyDays: 30,
@@ -26,8 +25,7 @@ export const SUBSCRIPTION_TIERS = {
     pro: {
         id: 'pro',
         name: 'Pro',
-        priceStars: 200,
-        priceNGN: 2000,
+        priceNGN: 15000,
         commandsPerDay: 200,
         maxRepos: 3,
         historyDays: 90,
@@ -37,8 +35,7 @@ export const SUBSCRIPTION_TIERS = {
     team: {
         id: 'team',
         name: 'Team',
-        priceStars: 500,
-        priceNGN: 5000,
+        priceNGN: 30000,
         commandsPerDay: -1,       // unlimited
         maxRepos: -1,             // unlimited
         historyDays: -1,          // unlimited
@@ -133,7 +130,7 @@ export function recordCommandUsage(session, command) {
 /**
  * Activate a subscription for a user
  */
-export async function activateSubscription(sessionId, tier, days, source = 'stars') {
+export async function activateSubscription(sessionId, tier, days = 30, source = 'paystack') {
     const tierConfig = SUBSCRIPTION_TIERS[tier];
     if (!tierConfig) {
         throw new Error(`Invalid tier: ${tier}`);
@@ -147,7 +144,6 @@ export async function activateSubscription(sessionId, tier, days, source = 'star
         subscription_expires_at: expiresAt.toISOString(),
         subscription_source: source,
         subscription_activated_at: new Date().toISOString(),
-        subscription_days: days,
     };
 }
 
@@ -162,6 +158,38 @@ export function deactivateSubscription() {
     };
 }
 
+// ─── Payment Methods Config ──────────────────────────────────────────────────
+
+export const PAYMENT_METHODS = {
+    paystack: {
+        id: 'paystack',
+        name: 'Paystack (Card/Bank/USSD)',
+        description: '💳 Instant activation via Paystack',
+        enabled: !!process.env.PAYSTACK_SECRET_KEY,
+    },
+    bank: {
+        id: 'bank',
+        name: 'Bank Transfer (Opay/Palmpay)',
+        description: '🏦 Manual activation (~5 min)',
+        enabled: !!process.env.PAYMENT_BANK_ACCOUNT && process.env.PAYMENT_BANK_ACCOUNT !== '__SET_REAL_ACCOUNT_IN_ENV__',
+        details: {
+            bank: 'Opay',
+            account_number: process.env.PAYMENT_BANK_ACCOUNT,
+            account_name: 'AirCommit',
+        },
+    },
+    crypto: {
+        id: 'crypto',
+        name: 'Crypto (USDT/BNB)',
+        description: '💰 Manual activation (~10 min)',
+        enabled: !!process.env.PAYMENT_USDT_BSC && process.env.PAYMENT_USDT_BSC !== '0x0000000000000000000000000000000000000000',
+        details: {
+            usdt_bsc: process.env.PAYMENT_USDT_BSC,
+            bnb_bsc: process.env.PAYMENT_BNB_BSC,
+        },
+    },
+};
+
 // ─── Upgrade Message Builder ─────────────────────────────────────────────────
 
 export function buildUpgradeMessage(chatId) {
@@ -171,23 +199,23 @@ export function buildUpgradeMessage(chatId) {
     let message = `💎 *AirCommit Premium*\n\n`;
     message += `Unlock the full power of AI coding:\n\n`;
 
-    message += `📦 *Starter* — 50 Stars/week (₦500)\n`;
-    message += `   • 50 commands/week\n`;
+    message += `📦 *Starter* — ₦5,000/mo\n`;
+    message += `   • 50 commands/month\n`;
     message += `   • Smart code suggestions\n\n`;
 
-    message += `🚀 *Pro* — 200 Stars/week (₦2,000)\n`;
-    message += `   • 200 commands/week\n`;
+    message += `🚀 *Pro* — ₦15,000/mo\n`;
+    message += `   • 200 commands/month\n`;
     message += `   • AI code fixes, compile & run\n`;
     message += `   • Code editor access\n`;
     message += `   • PR reviews\n\n`;
 
-    message += `👥 *Team* — 500 Stars/week (₦5,000)\n`;
+    message += `👥 *Team* — ₦30,000/mo\n`;
     message += `   • Unlimited commands\n`;
     message += `   • All features + multi-repo\n`;
     message += `   • Team AI memory\n\n`;
 
-    message += `*Pay with Telegram Stars:*\n`;
-    message += `⭐ Click \`/upgrade\` for instant activation\n\n`;
+    message += `*Pay with:*\n`;
+    message += `💳 Click \`/upgrade\` to pay with Paystack (card, bank, USSD)\n\n`;
 
     return message;
 }
@@ -195,10 +223,10 @@ export function buildUpgradeMessage(chatId) {
 // ─── Premium Feature Messages ────────────────────────────────────────────────
 
 export function premiumFeatureMessage() {
-    return '🔒 *Premium Feature*\n\nThis requires a Starter plan or higher.\n\nUse `/upgrade` to unlock with Telegram Stars.';
+    return '🔒 *Premium Feature*\n\nThis requires a Starter plan or higher.\n\nUse `/upgrade` to activate with Paystack.';
 }
 
 export function commandLimitMessage(remaining) {
     const cmd1 = '`/upgrade`';
-    return '⏰ *Daily limit reached*\n\nYou have used your 10 free commands for today.\n\nUpgrade to *Starter* (N500/week) for 50 commands/week.\nUse ' + cmd1 + ' to upgrade now!';
+    return '⏰ *Monthly limit reached*\n\nYou have used your commands for this billing period.\n\nUpgrade to *Starter* (₦5,000/mo) for 50 commands/month.\nUse ' + cmd1 + ' to upgrade now!';
 }

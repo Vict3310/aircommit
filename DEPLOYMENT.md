@@ -448,9 +448,11 @@ SENTRY_DSN=https://xxx@sentry.io/yyy
 
 ### Payment issues
 
-1. Verify `PAYMENT_USDT_BSC`, `PAYMENT_BNB_BSC`, `PAYMENT_BANK_ACCOUNT` are real values
-2. Ensure `ADMIN_CHAT_IDS` is set for approval workflow
-3. Check `payment.js` logs for errors
+1. Verify `PAYSTACK_SECRET_KEY`, `PAYSTACK_PUBLIC_KEY`, `PAYSTACK_WEBHOOK_SECRET` are set
+2. Ensure `PAYSTACK_WEBHOOK_SECRET` matches the value configured in your Paystack dashboard
+3. Verify `ADMIN_CHAT_IDS` is set for manual payment approval (bank/crypto fallback)
+4. Check `payment.js` and `paystack.js` logs for errors
+5. Test webhook at: `curl -X POST https://your-domain.com/webhook/paystack`
 
 ### Redis connection failures
 
