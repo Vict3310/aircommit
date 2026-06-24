@@ -36,7 +36,7 @@ export async function createCheckoutSession(chatId, tier, email, amountNGN) {
 
     // Paystack amounts are in kobo (1 NGN = 100 kobo)
     const amountKobo = amountNGN * 100;
-    const reference = `aircommit_${tier}_${chatId}_${Date.now()}`;
+    const reference = `aircommit_${tier}_${chatId}_${crypto.randomUUID()}`;
 
     try {
         const response = await fetch(`${PAYSTACK_BASE_URL}/transaction`, {

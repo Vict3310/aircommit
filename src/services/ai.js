@@ -81,6 +81,26 @@ async function resolveUserAI(chatId, defaultModel) {
   }
 }
 
+/**
+ * Resolves the API key and endpoint for a fallback model.
+ * Uses the user's custom key if available, otherwise falls back to server config.
+ */
+async function resolveFallbackAIKey(fallbackModel, userApiKey, userEndpoint) {
+  // If the user has a custom key, try to resolve the correct endpoint for this fallback model
+  const resolved = await resolveAIKey(null, fallbackModel, config);
+  if (resolved) {
+    // If the model category matches the user's key (e.g. both OpenRouter), use user's key
+    const userResolved = await resolveAIKey(null, fallbackModel, { openrouterKey: userApiKey });
+    if (userResolved && userResolved.endpoint === resolved.endpoint) {
+      return { apiKey: userApiKey, endpoint: userResolved.endpoint };
+    }
+    // Otherwise use server key for the fallback model's native endpoint
+    return { apiKey: resolved.apiKey, endpoint: resolved.endpoint };
+  }
+  // Default fallback to OpenRouter with user's key or server key
+  return { apiKey: userApiKey || config.openrouterKey, endpoint: 'https://openrouter.ai/api/v1/chat/completions' };
+}
+
 export async function callAI(systemPrompt, userMessage, model = config.codingModel, chatId = null) {
   const { apiKey, model: resolvedModel, endpoint } = await resolveUserAI(chatId, model);
   const response = await fetchWithTimeout(endpoint, {
@@ -110,10 +130,10 @@ export async function callAI(systemPrompt, userMessage, model = config.codingMod
     if (response.status === 429) {
       throw Object.assign(new Error(`Rate limited: ${errMsg}`), { rateLimited: true });
     }
-    throw new Error(`OpenRouter API error: ${errMsg}`);
+    throw new Error(`AI API error: ${errMsg}`);
   }
   if (!json.choices || json.choices.length === 0) {
-    throw new Error('OpenRouter returned no choices.');
+    throw new Error('AI returned no choices.');
   }
 
   const raw = json.choices[0].message.content;
@@ -155,17 +175,10 @@ export async function callAIRaw(systemPrompt, userMessage, model = config.coding
     if (response.status === 429) {
       throw Object.assign(new Error(`Rate limited: ${errMsg}`), { rateLimited: true });
     }
-    throw new Error(`OpenRouter API error: ${errMsg}`);
+    throw new Error(`AI API error: ${errMsg}`);
   }
   return json.choices[0].message.content.replace(/^\`\`\`(?:[a-zA-Z0-9]+)?\n?/i, '').replace(/\n?\`\`\`$/i, '').trim();
 }
-
-const CHAT_MODEL_FALLBACKS = [
-  config.chatModel,
-  'nvidia/nemotron-3-super-120b-a12b:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'qwen/qwen3-coder:free',
-];
 
 async function tryOneChatRound(model, currentMessages, apiKey, endpoint) {
   const response = await fetchWithTimeout(endpoint, {
@@ -194,7 +207,7 @@ async function tryOneChatRound(model, currentMessages, apiKey, endpoint) {
     if (response.status === 429) {
       throw Object.assign(new Error(`Rate limited: ${errMsg}`), { rateLimited: true });
     }
-    throw new Error(`OpenRouter API error: ${errMsg}`);
+    throw new Error(`AI API error: ${errMsg}`);
   }
   if (!json.choices || json.choices.length === 0) {
     throw new Error(`Model ${model} returned no choices.`);
@@ -237,8 +250,9 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
     try {
       for (const model of [activeModel, ...fallbacks]) {
         try {
-          const currentEndpoint = (model === activeModel) ? activeEndpoint : 'https://openrouter.ai/api/v1/chat/completions';
-          const currentApiKey = (model === activeModel) ? apiKey : config.openrouterKey;
+          const { apiKey: currentApiKey, endpoint: currentEndpoint } = model === activeModel
+            ? { apiKey, endpoint: activeEndpoint }
+            : await resolveFallbackAIKey(model, apiKey, activeEndpoint);
           const actualModelName = model.startsWith('0g/') ? model.replace('0g/', '') : model;
 
           assistantMessage = await tryOneChatRound(actualModelName, currentMessages, currentApiKey, currentEndpoint);

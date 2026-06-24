@@ -101,6 +101,18 @@ export async function getDefaultBranch(octokit, owner, repo) {
 
 const fileTreeCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const MAX_CACHE_ENTRIES = 500; // Prevent unbounded memory growth
+
+/**
+ * LRU-evict the oldest entry when cache is full.
+ * Maps are insertion-ordered in ES2015+, so first() gives the oldest.
+ */
+function evictLRU() {
+  if (fileTreeCache.size > MAX_CACHE_ENTRIES) {
+    const oldestKey = fileTreeCache.keys().next().value;
+    fileTreeCache.delete(oldestKey);
+  }
+}
 
 export async function getRepoFilePaths(octokit, owner, repo, defaultBranch) {
   const cacheKey = `${owner}/${repo}:${defaultBranch}`;
@@ -137,6 +149,7 @@ export async function getRepoFilePaths(octokit, owner, repo, defaultBranch) {
     .filter(p => !IGNORED_EXTS.some(ext => p.endsWith(ext)));
 
   // Update both caches
+  evictLRU();
   fileTreeCache.set(cacheKey, { paths, timestamp: Date.now() });
   const setResult = await setFileTreeCache(owner, repo, defaultBranch, paths);
   if (!setResult) console.warn('[GitHub] Failed to cache file tree to Redis (main path)');

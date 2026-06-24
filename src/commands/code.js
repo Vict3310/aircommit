@@ -311,7 +311,7 @@ export function registerCodeCommands(bot, sendStatus) {
       }
 
       const filesContext = files.map(f => `File: ${f.filePath}\nContent:\n\`\`\`\n${f.content}\n\`\`\``).join('\n\n');
-      const result = await callAI(MULTI_PATCH_PROMPT, `${filesContext}\n\nInstruction: ${intent}`);
+      const result = await callAI(MULTI_PATCH_PROMPT, `${filesContext}\n\nInstruction: ${intent}`, undefined, chatId);
 
       if (!result.patches || result.patches.length === 0) {
         throw new Error('AI returned no patches.');
@@ -326,7 +326,7 @@ export function registerCodeCommands(bot, sendStatus) {
 
       await status.update('📝 Generating Pull Request description...');
       const diffsSummary = result.patches.map(p => `File: ${p.filePath}\nDiff:\n- ${p.find.trim()}\n+ ${p.replace.trim()}`).join('\n\n');
-      const prMeta = await callAI(PR_DESCRIPTION_PROMPT, `Instruction: ${intent}\n\nChanges:\n${diffsSummary}`);
+      const prMeta = await callAI(PR_DESCRIPTION_PROMPT, `Instruction: ${intent}\n\nChanges:\n${diffsSummary}`, undefined, chatId);
 
       await status.update('🌿 Creating GitHub Pull Request...');
       const { data: prData } = await octokit.pulls.create({
@@ -454,6 +454,12 @@ Provide a concise, constructive code review using markdown (bullet points). Focu
       return bot.sendMessage(chatId, gate.message);
     }
 
+    // Check rate limit
+    const rl = checkBotRateLimit(chatId, 'heavy');
+    if (rl) {
+      return bot.sendMessage(chatId, rl);
+    }
+
     try {
       const session = await requireSession(chatId);
       const filePath = match[1] || session.active_file;
@@ -470,7 +476,9 @@ Return ONLY a valid JSON object matching this schema:
   "testContent": "raw test code here",
   "commitMessage": "commit message"
 }`,
-        `File: ${filePath}\n\nCode:\n${content}`
+        `File: ${filePath}\n\nCode:\n${content}`,
+        undefined,
+        chatId
       );
 
       if (!result.testFilePath || !result.testContent) {
@@ -478,14 +486,26 @@ Return ONLY a valid JSON object matching this schema:
       }
 
       const testBase64 = Buffer.from(result.testContent).toString('base64');
-      await octokit.repos.createOrUpdateFileContents({
-        owner, repo,
-        path: result.testFilePath,
-        message: result.commitMessage || `test: add unit tests for ${filePath}`,
+      const actionId = generateActionId();
+      setPendingAction(actionId, {
+        type: 'test',
+        octokit, owner, repo,
+        filePath: result.testFilePath,
         content: testBase64,
+        commitMessage: result.commitMessage || `test: add unit tests for ${filePath}`,
+        originalFilePath: filePath,
       });
 
-      await status.update(`✅ Created test file: \`${result.testFilePath}\``);
+      const keyboard = [
+        [{ text: '✅ Approve & Commit', callback_data: `approve_action:${actionId}` }],
+        [{ text: '❌ Reject', callback_data: `reject_action:${actionId}` }]
+      ];
+
+      await status.delete();
+      bot.sendMessage(chatId, `⚠️ *Pending Test File: \`${result.testFilePath}\`*\n\n\`\`\`\n${result.testContent.substring(0, 3000)}\n\`\`\`\n\n📝 _${result.commitMessage || 'test: add unit tests'}_\n\nReply with \`approve\` to commit, or \`reject\` to discard.`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: keyboard }
+      });
     } catch (error) {
       await status.update(`❌ Testing failed: ${error.message}`);
     }
@@ -575,6 +595,14 @@ Return ONLY a valid JSON object matching this schema:
             content: contentBase64,
           });
           successMsg = `✅ *File Created Live!*\n\n📄 File: \`${action.filePath}\``;
+        } else if (action.type === 'test') {
+          await action.octokit.repos.createOrUpdateFileContents({
+            owner: action.owner, repo: action.repo,
+            path: action.filePath,
+            message: action.commitMessage,
+            content: action.content,
+          });
+          successMsg = `✅ *Test File Created Live!*\n\n📄 File: \`${action.filePath}\`\n📝 Commit: _${action.commitMessage}_`;
         }
 
         deletePendingAction(actionId);
@@ -592,8 +620,8 @@ Return ONLY a valid JSON object matching this schema:
             // Reconstruct the new content from the patch find/replace
             const newContent = action.content.replace(action.patch.find, action.patch.replace);
             buildVerification = await verifyBuildSandbox(action.filePath, newContent);
-          } else if (action.type === 'create') {
-            buildVerification = await verifyBuildSandbox(action.filePath, action.content);
+          } else if (action.type === 'create' || action.type === 'test') {
+            buildVerification = await verifyBuildSandbox(action.filePath, Buffer.from(action.content, 'base64').toString('utf-8'));
           }
         } catch (sandboxErr) {
           buildVerification = { status: 'ERROR', log: sandboxErr.message };
