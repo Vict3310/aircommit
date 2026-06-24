@@ -289,6 +289,13 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
     const treeChanges = [];
     const toolResults = [];
 
+    // Destructure session properties once so they're available outside
+    // the per-tool try block (used in pending-changes return below).
+    let owner, repo, octokit;
+    if (session) {
+      ({ octokit, owner, repo } = session);
+    }
+
     for (const toolCall of assistantMessage.tool_calls) {
       const fnName = toolCall.function.name;
       let args;
@@ -307,7 +314,6 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
         if (!session) {
           throw new Error("You must be logged in and select a repo to use tools. Tell the user to use /login and /use.");
         }
-        const { octokit, owner, repo } = session;
 
         if (fnName === 'list_repo_files') {
           await onStatus('📂 Scanning repository file tree...');
