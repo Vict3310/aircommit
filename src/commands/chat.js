@@ -241,6 +241,7 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
 
           // Filter out no-op changes (where new content matches original)
           const meaningfulChanges = [];
+          const normalize = str => str.replace(/\r\n/g, '\n');
           for (const change of changes) {
             if (change.action === 'patch' || change.action === 'create') {
               // Fetch current content to check if the change is meaningful
@@ -249,7 +250,7 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
                   createWriteOctokit(session.github_token),
                   owner, repoName, change.path
                 );
-                if (change.action === 'patch' && content === change.content) {
+                if (change.action === 'patch' && normalize(content) === normalize(change.content)) {
                   console.log(`[Commit] Skipping no-op patch: ${change.path}`);
                   continue;
                 }
