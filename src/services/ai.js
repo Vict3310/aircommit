@@ -347,17 +347,22 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           const { content: originalContent } = await fetchFile(octokit, owner, repo, args.file_path);
 
           // Normalize line-endings for consistent comparison
-          const normalize = str => str.replace(/\r\n/g, '\n').trim();
+          const normalize = str => str.replace(/\r\n/g, '\n');
           const normOriginal = normalize(originalContent);
           const normFind = normalize(args.find);
           const normReplace = normalize(args.replace);
 
-          // Guard: reject no-op patches where find == replace
+          // Guard: reject no-op patches where find == replace (return error
+          // to AI instead of throwing — prevents infinite retry loops)
           if (normFind === normReplace) {
-            result = `System: The "find" and "replace" text are identical for \`${args.file_path}\` — no actual change would be made. Aborting.`;
-            throw new Error('No-op patch detected — find and replace are identical.');
+            throw new Error(
+              'The "find" and "replace" text are identical for ' +
+              `\`${args.file_path}\` — no actual change would be made. ` +
+              'Provide a different replacement text or use create_or_overwrite_file instead.'
+            );
           }
 
+          let newContent;
           if (normOriginal.includes(normFind)) {
             newContent = normalize(normOriginal.replace(normFind, normReplace));
           } else {
@@ -367,6 +372,15 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
             } else {
               throw new Error(`The "find" text block was not found in the original file.`);
             }
+          }
+
+          // Second check: verify the patched content actually differs from original
+          const normNew = normalize(newContent);
+          if (normNew === normOriginal) {
+            throw new Error(
+              'The resulting file content would be identical to the current file ' +
+              `(${args.file_path}). The patch has no effect — provide a different replacement.`
+            );
           }
 
           treeChanges.push({

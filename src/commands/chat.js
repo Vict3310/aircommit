@@ -238,14 +238,45 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
       if (pendingChanges && normalizedText === 'approve') {
         try {
           const { changes, commitMessage, owner, repoName, chatId: pcChatId } = pendingChanges;
+
+          // Filter out no-op changes (where new content matches original)
+          const meaningfulChanges = [];
+          for (const change of changes) {
+            if (change.action === 'patch' || change.action === 'create') {
+              // Fetch current content to check if the change is meaningful
+              try {
+                const { content } = await fetchFile(
+                  createWriteOctokit(session.github_token),
+                  owner, repoName, change.path
+                );
+                if (change.action === 'patch' && content === change.content) {
+                  console.log(`[Commit] Skipping no-op patch: ${change.path}`);
+                  continue;
+                }
+              } catch (fetchErr) {
+                // Can't verify — include change and let commit handle it
+                console.warn(`[Commit] Could not verify patch ${change.path}:`, fetchErr.message);
+              }
+            }
+            meaningfulChanges.push(change);
+          }
+
+          // If all changes were no-ops, don't commit
+          if (meaningfulChanges.length === 0) {
+            await safeSend(pcChatId, `🛑 No meaningful changes to commit. The patches had no effect — please ask the AI to produce a real diff.`);
+            return;
+          }
+
           const writeOctokit = createWriteOctokit(session.github_token);
           const defaultBranch = await getDefaultBranch(writeOctokit, owner, repoName);
-          await commitChangesWithTree(writeOctokit, owner, repoName, defaultBranch, commitMessage, changes);
+          const commitSha = await commitChangesWithTree(writeOctokit, owner, repoName, defaultBranch, commitMessage, meaningfulChanges);
           await invalidateFileTree(owner, repoName);
+
+          console.log(`[Commit] Successfully committed to ${owner}/${repoName}:${defaultBranch} — ${commitSha}`);
 
           // Track in session history
           const actionHistory = session.action_history || [];
-          actionHistory.push({ action: commitMessage, file: changes.map(c => c.path).join(', '), timestamp: new Date().toISOString() });
+          actionHistory.push({ action: commitMessage, file: meaningfulChanges.map(c => c.path).join(', '), timestamp: new Date().toISOString() });
           await saveUserSession(pcChatId, { action_history: actionHistory.slice(-50) });
 
           // Upload audit to 0G
@@ -254,7 +285,8 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
             type: 'agent_edit',
             repo: `${owner}/${repoName}`,
             commitMessage,
-            steps: changes.map(c => ({ file: c.path, action: c.action, status: '✅' })),
+            commitSha,
+            steps: meaningfulChanges.map(c => ({ file: c.path, action: c.action, status: '✅' })),
             approvedByChatId: pcChatId,
           };
           let zgRes;
@@ -278,6 +310,7 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
             await safeSend(pcChatId, warnMsg);
           }
         } catch (commitErr) {
+          console.error('[Commit] Error:', commitErr.message, commitErr.stack);
           await safeSend(chatId, `❌ Commit failed: ${commitErr.message}`);
         }
         return; // Don't send the pending changes prompt reply after approval
