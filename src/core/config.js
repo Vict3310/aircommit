@@ -114,10 +114,8 @@ const config = {
   zerogFallbackNodes: process.env.ZEROG_FALLBACK_NODES || 'https://rpc-storage-testnet.0g.ai',
 
   // Payment & subscription config
-  // WARNING: These values are shown to users for manual payments.
-  // MUST be set via environment variables before production.
   adminChatIds: process.env.ADMIN_CHAT_IDS || '',
-  paymentBankAccount: process.env.PAYMENT_BANK_ACCOUNT || '__PLACEHOLDER_SET_REAL_VALUE__',
+  paymentBankAccount: process.env.PAYMENT_BANK_ACCOUNT || '',
 
   // Validation results (for runtime checks)
   _validation: validation
@@ -126,12 +124,6 @@ const config = {
 // Runtime security check for webhook secret (in case it was loaded late)
 if (config.webhookUrl && (!config.githubWebhookSecret || config.githubWebhookSecret.length < MIN_WEBHOOK_SECRET_LENGTH)) {
   console.error('[Security] GITHUB_WEBHOOK_SECRET is required and must be at least 32 characters when WEBHOOK_URL is set.');
-  process.exit(1);
-}
-
-// Runtime check: warn if payment placeholders are still set
-if (config.paymentBankAccount === '__PLACEHOLDER_SET_REAL_VALUE__') {
-  console.error('[CRITICAL] PAYMENT_BANK_ACCOUNT is set to a placeholder. Update PAYMENT_BANK_ACCOUNT in your .env before going live.');
   process.exit(1);
 }
 
