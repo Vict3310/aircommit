@@ -266,10 +266,22 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
     if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
       let reply = assistantMessage.content || '(No response from model)';
       await onStatus('✍️ Writing response...');
+
       // Guard: strip raw tool-call JSON artifacts that models sometimes
-      // output as plain text instead of invoking tools.
-      if (/^\s*\{[^{}]*"type"\s*:\s*["\']function["\']/.test(reply)) {
-        reply = 'I\'m sorry, I encountered an unexpected error. Please try again.';
+      // output as plain text instead of invoking tools. These can appear at
+      // the start of the reply or mixed into the text body.
+      const jsonArtifactRe = /\{\s*"type"\s*:\s*["\']function["\'][^{}]*\}/g;
+      const jsonAnywhere = jsonArtifactRe.test(reply);
+
+      if (jsonAnywhere) {
+        // Try stripping the artifact — if the remaining text is sensible,
+        // return the cleaned reply. Otherwise bail out with an error message.
+        const cleaned = reply.replace(jsonArtifactRe, '').trim();
+        if (cleaned.length > 20 && cleaned.length < reply.length) {
+          reply = cleaned;
+        } else {
+          reply = 'I\'m sorry, I encountered an unexpected error. Please try again.';
+        }
       }
       return { reply, updatedMessages: currentMessages };
     }
