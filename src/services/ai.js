@@ -264,8 +264,13 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
 
     // If the model returned no tool calls and a text reply, return it
     if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-      const reply = assistantMessage.content || '(No response from model)';
+      let reply = assistantMessage.content || '(No response from model)';
       await onStatus('✍️ Writing response...');
+      // Guard: strip raw tool-call JSON artifacts that models sometimes
+      // output as plain text instead of invoking tools.
+      if (/^\s*\{[^{}]*"type"\s*:\s*["\']function["\']/.test(reply)) {
+        reply = 'I\'m sorry, I encountered an unexpected error. Please try again.';
+      }
       return { reply, updatedMessages: currentMessages };
     }
 
@@ -407,11 +412,12 @@ export async function callChatWithTools(chatId, messages, onStatus = async () =>
           result = `Successfully staged package.json updates. User must run npm install locally.`;
         } else {
           // Fuzzy match: try to find closest known tool name
+          // Normalize everything: lowercase, strip underscores/hyphens/dots, handle camelCase
           const knownTools = ['list_repo_files', 'read_file', 'create_or_overwrite_file', 'patch_file', 'delete_file', 'manage_dependencies'];
-          const normalized = fnName.replace(/[_-]/g, '').toLowerCase();
+          const normalized = fnName.toLowerCase().replace(/[_\-\.]/g, '').replace(/([a-z])([A-Z])/g, '$1$2');
           let matched = false;
           for (const known of knownTools) {
-            const knownNormalized = known.replace(/[_-]/g, '').toLowerCase();
+            const knownNormalized = known.toLowerCase().replace(/[_\-\.]/g, '').replace(/([a-z])([A-Z])/g, '$1$2');
             if (normalized === knownNormalized || normalized.includes(knownNormalized) || knownNormalized.includes(normalized)) {
               // Hint the model to retry with the correct tool name
               result = `System: You called "${fnName}" but the correct tool name is "${known}". Please retry using "${known}" with the same arguments.`;
