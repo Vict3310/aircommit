@@ -12,7 +12,6 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { ProfilingIntegration } from '@sentry/profiling-node';
 import config from './config.js';
 
 const SENTRY_DSN = process.env.SENTRY_DSN;
@@ -44,7 +43,6 @@ export function initSentry() {
       environment: process.env.NODE_ENV || 'development',
       release: '1.0.0', // Update on each deploy
       tracesSampleRate: PROFILE_ENABLED ? 1.0 : 0.1,
-      profilesSampleRate: PROFILE_ENABLED ? 1.0 : 0.0,
 
       // Only capture errors from production
       beforeSend(event, hint) {
@@ -66,9 +64,6 @@ export function initSentry() {
       integrations: [
         // Automatic HTTP request tracing
         Sentry.autoDiscoverNodePerformanceMonitoringIntegrations(),
-
-        // Profiling (optional)
-        ...(PROFILE_ENABLED ? [new ProfilingIntegration()] : []),
       ],
     });
 
