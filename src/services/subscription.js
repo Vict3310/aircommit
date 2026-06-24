@@ -178,16 +178,6 @@ export const PAYMENT_METHODS = {
             account_name: 'AirCommit',
         },
     },
-    crypto: {
-        id: 'crypto',
-        name: 'Crypto (USDT/BNB)',
-        description: '💰 Manual activation (~10 min)',
-        enabled: !!process.env.PAYMENT_USDT_BSC && process.env.PAYMENT_USDT_BSC !== '0x0000000000000000000000000000000000000000',
-        details: {
-            usdt_bsc: process.env.PAYMENT_USDT_BSC,
-            bnb_bsc: process.env.PAYMENT_BNB_BSC,
-        },
-    },
 };
 
 // ─── Upgrade Message Builder ─────────────────────────────────────────────────

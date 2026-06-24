@@ -99,8 +99,7 @@ Telegram
 **Payment methods:**
 - ⭐ **Telegram Stars** (primary, instant)
 - 🏦 Bank transfer (manual approval)
-- ₮ USDT (BSC) (manual approval)
-- BNB (BSC) (manual approval)
+- 💳 Paystack (card, bank, USSD) — via `/upgrade`
 
 ---
 
@@ -121,7 +120,7 @@ Telegram
 See **[.env.example](./.env.example)** for the full list. Key variables:
 
 - **Required:** `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, `ENCRYPTION_KEY`
-- **Payment (CRITICAL):** `PAYMENT_USDT_BSC`, `PAYMENT_BNB_BSC`, `PAYMENT_BANK_ACCOUNT` — must be real addresses
+- **Payment (CRITICAL):** `PAYMENT_BANK_ACCOUNT` — must be a real account number
 - **Optional:** `SUPABASE_*`, `ZEROG_*`, `GROQ_API_KEY`, `REDIS_URL`
 
 ---

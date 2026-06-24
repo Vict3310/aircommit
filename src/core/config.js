@@ -116,11 +116,8 @@ const config = {
   // Payment & subscription config
   // WARNING: These values are shown to users for manual payments.
   // MUST be set via environment variables before production.
-  // Zero-address defaults below are NOT real — they will leak funds.
   adminChatIds: process.env.ADMIN_CHAT_IDS || '',
   paymentBankAccount: process.env.PAYMENT_BANK_ACCOUNT || '__PLACEHOLDER_SET_REAL_VALUE__',
-  paymentUsdtBsc: process.env.PAYMENT_USDT_BSC || '0x0000000000000000000000000000000000000000',
-  paymentBnbBsc: process.env.PAYMENT_BNB_BSC || '0x0000000000000000000000000000000000000000',
 
   // Validation results (for runtime checks)
   _validation: validation
@@ -132,16 +129,7 @@ if (config.webhookUrl && (!config.githubWebhookSecret || config.githubWebhookSec
   process.exit(1);
 }
 
-// Runtime check: warn if payment placeholders are still set to zero/placeholder values
-const zeroAddress = '0x0000000000000000000000000000000000000000';
-if (config.paymentUsdtBsc === zeroAddress) {
-  console.error('[CRITICAL] PAYMENT_USDT_BSC is set to a zero-address placeholder. Users sending USDT will LOSE funds. Set PAYMENT_USDT_BSC in your .env before going live.');
-  process.exit(1);
-}
-if (config.paymentBnbBsc === zeroAddress) {
-  console.error('[CRITICAL] PAYMENT_BNB_BSC is set to a zero-address placeholder. Users sending BNB will LOSE funds. Set PAYMENT_BNB_BSC in your .env before going live.');
-  process.exit(1);
-}
+// Runtime check: warn if payment placeholders are still set
 if (config.paymentBankAccount === '__PLACEHOLDER_SET_REAL_VALUE__') {
   console.error('[CRITICAL] PAYMENT_BANK_ACCOUNT is set to a placeholder. Update PAYMENT_BANK_ACCOUNT in your .env before going live.');
   process.exit(1);

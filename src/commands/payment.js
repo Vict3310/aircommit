@@ -2,12 +2,12 @@
  * Payment Commands — AirCommit
  *
  * Primary payment method: Paystack (card, bank transfer, USSD).
- * Fallback: manual bank transfer and crypto (admin-activated).
+ * Fallback: manual bank transfer (admin-activated).
  *
  * Flow:
  * 1. /upgrade → show tiers → user picks → Paystack checkout URL
  * 2. User pays on Paystack → webhook fires → auto-activate
- * 3. Bank/crypto fallback → user sends proof → admin activates manually
+ * 3. Bank fallback → user sends proof → admin activates manually
  */
 
 import { saveUserSession, getUserSession } from '../services/supabase.js';
@@ -115,10 +115,6 @@ export function registerPaymentCommands(bot) {
                         [
                             { text: `💳 Pay ₦${tierConfig.priceNGN.toLocaleString()} with Paystack`, type: 'url', url: checkout.url },
                         ],
-                        [
-                            { text: '🏦 Bank Transfer', callback_data: 'pay_bank' },
-                            { text: '💰 Crypto', callback_data: 'pay_crypto' },
-                        ],
                     ],
                 };
 
@@ -127,7 +123,7 @@ export function registerPaymentCommands(bot) {
                     `Click below to pay securely with Paystack:\n` +
                     `(Card, Bank Transfer, or USSD)\n\n` +
                     `*Amount:* ₦${tierConfig.priceNGN.toLocaleString()}/month\n\n` +
-                    `Didn't work? Use bank transfer or crypto below.`,
+                    `Use bank transfer below as an alternative.`,
                     { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: keyboard }
                 );
             } catch (error) {
@@ -141,7 +137,7 @@ export function registerPaymentCommands(bot) {
             return;
         }
 
-        // ── Bank/Crypto fallback ──────────────────────────────────────────
+        // ── Bank transfer fallback ──────────────────────────────────────────
         if (data === 'pay_bank' && PAYMENT_METHODS.bank.enabled) {
             bot.editMessageText(
                 `🏦 *Bank Transfer Payment*\n\n` +
@@ -157,25 +153,6 @@ export function registerPaymentCommands(bot) {
                 `• Amount sent\n` +
                 `• Phone number used\n\n` +
                 `We'll activate within 5 minutes.`,
-                { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown' }
-            );
-            return;
-        }
-
-        if (data === 'pay_crypto' && PAYMENT_METHODS.crypto.enabled) {
-            bot.editMessageText(
-                `💰 *Crypto Payment*\n\n` +
-                `Send USDT (BSC) or BNB to:\n\n` +
-                `**USDT (BSC):**\n\`\`\`\n${PAYMENT_METHODS.crypto.details.usdt_bsc}\n\`\`\`\n\n` +
-                `**BNB (BSC):**\n\`\`\`\n${PAYMENT_METHODS.crypto.details.bnb_bsc}\n\`\`\`\n\n` +
-                `*Amounts (in NGN equivalent):*\n` +
-                `• Starter: ₦5,000/month\n` +
-                `• Pro: ₦15,000/month\n` +
-                `• Team: ₦30,000/month\n\n` +
-                `After payment, *reply to this message* with:\n` +
-                `• Transaction hash\n` +
-                `• Network (BSC mainnet)\n\n` +
-                `We'll activate within 10 minutes.`,
                 { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown' }
             );
             return;
