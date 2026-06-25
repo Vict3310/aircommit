@@ -8,7 +8,6 @@ import { commitChangesWithTree, getDefaultBranch, createWriteOctokit, invalidate
 import config from '../core/config.js';
 import { encrypt } from '../services/supabase.js';
 import { fetchWithTimeout } from '../core/fetch-timeout.js';
-import { setPendingAction, generateActionId } from '../core/pending.js';
 
 const HISTORY_FILE = path.resolve('./chat_history.json');
 const MAX_HISTORY = 20;
@@ -211,34 +210,17 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
         history.splice(1, history.length - MAX_HISTORY - 1);
       }
 
-      const typingInterval = setInterval(() => bot.sendChatAction(chatId, 'typing'), 4000);
-      const statusMsg = await bot.sendMessage(chatId, '🧠 Thinking...');
-      const editStatus = async (statusText) => {
-        try {
-          await bot.editMessageText(statusText, { chat_id: chatId, message_id: statusMsg.message_id });
-        } catch (_) { }
-      };
-
-      let reply, updatedMessages, pendingChanges;
-      try {
-        ({ reply, updatedMessages, pendingChanges } = await callChatWithTools(chatId, history, editStatus, hasImage));
-      } finally {
-        clearInterval(typingInterval);
-        bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
-      }
-
-      chatHistories.set(chatId, updatedMessages);
-      chatHistories.metadata[chatId] = { lastActive: Date.now() };
-      saveHistories();
-
-      // Auto-archive substantial conversations to 0G
-      autoArchiveChatTo0G(chatId);
-
-      // Handle approve/reject for pending chat changes
+      // Check for pending approval/reject BEFORE sending message to AI
+      // If a previous AI call produced uncommitted changes, approve/reject
+      // them immediately without re-invoking the AI (otherwise the AI might
+      // ignore "approve" or generate entirely new changes).
       const normalizedText = (text || '').trim().toLowerCase();
-      if (pendingChanges && normalizedText === 'approve') {
+      const storedPending = chatHistories.metadata?.[`pending_${chatId}`];
+
+      // If there's a stored pending approval/reject, handle it first
+      if (storedPending && normalizedText === 'approve') {
         try {
-          const { changes, commitMessage, owner, repoName, chatId: pcChatId } = pendingChanges;
+          const { changes, commitMessage, owner, repoName, chatId: pcChatId } = storedPending;
 
           // Filter out no-op changes (where new content matches original)
           const meaningfulChanges = [];
@@ -316,25 +298,41 @@ Run \`node aircommit-sync.js\` in your project folder to auto-sync AI commits vi
           await safeSend(chatId, `❌ Commit failed: ${commitErr.message}`);
         }
         return; // Don't send the pending changes prompt reply after approval
-      } else if (pendingChanges && normalizedText === 'reject') {
+      } else if (storedPending && normalizedText === 'reject') {
         await safeSend(chatId, `🗑️ Changes discarded.`);
+        delete chatHistories.metadata[`pending_${chatId}`];
         return; // Don't send the pending changes prompt reply after rejection
       }
 
-      if (pendingChanges) {
-        // Store as pending action so callback_query buttons also work
-        const actionId = generateActionId();
-        setPendingAction(actionId, { type: 'pendingChanges', ...pendingChanges });
+      // No stored pending approval — proceed with AI call
+      const typingInterval = setInterval(() => bot.sendChatAction(chatId, 'typing'), 4000);
+      const statusMsg = await bot.sendMessage(chatId, '🧠 Thinking...');
+      let reply, updatedMessages, aiPending;
+      try {
+        ({ reply, updatedMessages, pendingChanges: aiPending } = await callChatWithTools(chatId, history, async (statusText) => {
+          try { await bot.editMessageText(statusText, { chat_id: chatId, message_id: statusMsg.message_id }); } catch (_) { }
+        }, hasImage));
+      } finally {
+        clearInterval(typingInterval);
+        bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
+      }
 
-        // Send the pending changes prompt
-        if (reply.length > 4000) {
-          for (let i = 0; i < reply.length; i += 4000) {
-            await safeSend(chatId, reply.slice(i, i + 4000));
-          }
-        } else {
-          await safeSend(chatId, reply);
-        }
-        return; // Don't process further — user needs to approve/reject
+      chatHistories.set(chatId, updatedMessages);
+      chatHistories.metadata[chatId] = { lastActive: Date.now() };
+      saveHistories();
+
+      // Auto-archive substantial conversations to 0G
+      autoArchiveChatTo0G(chatId);
+
+      // Store AI-generated pendingChanges in metadata so next message can approve/reject
+      if (aiPending) {
+        chatHistories.metadata[`pending_${chatId}`] = aiPending;
+        const msg = aiPending.commitMessage || 'AI modifications';
+        const files = aiPending.changes.map(c => c.path).join(', ');
+        const owner = aiPending.owner;
+        const repoName = aiPending.repoName;
+        await safeSend(chatId, `🛠️ *${aiPending.changes.length} change(s) staged for \`${owner}/${repoName}\`*\n\n📝 _${msg}_\n📂 Files: ${files}\n\nReply with \`approve\` to commit, or \`reject\` to discard.`);
+        return;
       }
 
       if (reply.length > 4000) {
